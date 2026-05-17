@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model AppConfig {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}
+
+model Repository {
+  id             String   @id @default(cuid())
+  platform       String   @default("github") // github or gitlab
+  owner          String
+  name           String
+  fullName       String   @unique
+  installationId Int?     // GitHub App installation ID
+  gitlabHost     String?  // For self-hosted GitLab
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  reviews        Review[]
+}
+
+model Review {
+  id           String          @id @default(cuid())
+  repositoryId String
+  repository   Repository      @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  platform     String          @default("github")
+  prNumber     Int
+  prTitle      String
+  prAuthor     String
+  prUrl        String
+  status       String          @default("pending") // pending, reviewing, completed, failed
+  summary      String?
+  overallScore String?         // approve, request_changes, comment
+  checkRunId   Int?            // GitHub Check Run ID for merge-blocking
+  headSha      String?         // HEAD SHA of the PR commit for check runs
+  agentSteps   String?         // JSON string of agent steps
+  modelUsed    String?         // Which AI model was used
+  tokensUsed   Int?            // Approximate token count
+  isReReview   Boolean         @default(false) // Whether this is a re-review triggered by comment command
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  comments     ReviewComment[]
+}
+
+model ReviewComment {
+  id        String   @id @default(cuid())
+  reviewId  String
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  filePath  String
+  line      Int?
+  side      String?  // LEFT or RIGHT
+  body      String
+  severity  String?  // info, warning, error, critical
+  createdAt DateTime @default(now())
+}
