@@ -3,8 +3,13 @@ import { fetchPRDiff, fetchPRInfo, upsertRepository, postPRReview } from '@/lib/
 import { fetchMRDiff, fetchMRChanges, postMRDiscussion, postMRNote, upsertGitLabRepository } from '@/lib/gitlab';
 import { reviewPR } from '@/lib/reviewer';
 import { db } from '@/lib/db';
+import { requireAuth } from '@/lib/auth';
 
 export async function POST(request: NextRequest) {
+  // Auth check
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   try {
     const body = await request.json();
     const { owner, repo, prNumber, platform } = body;

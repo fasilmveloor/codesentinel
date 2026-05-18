@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { CONFIG_VALUE_MAX_LENGTH, MASK_MIN_LENGTH } from '@/lib/constants';
+import { requireAuth } from '@/lib/auth';
 
 const SENSITIVE_KEYS = [
   'github_token',
@@ -16,7 +17,11 @@ function maskValue(value: string): string {
   return value.substring(0, 4) + '----' + value.substring(value.length - 4);
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  // Auth check
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   try {
     const configs = await db.appConfig.findMany();
     const configMap: Record<string, string> = {};
@@ -58,6 +63,10 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  // Auth check
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   try {
     const body = await request.json();
     const { key, value } = body;
