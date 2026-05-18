@@ -22,6 +22,9 @@ import {
   ChevronRight,
   FileCode,
   AlertCircle,
+  LogOut,
+  KeyRound,
+  Lock,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -267,6 +270,12 @@ export default function Home() {
   const [blockMergeValue, setBlockMergeValue] = useState(false);
   const [savingBlockMerge, setSavingBlockMerge] = useState(false);
 
+  // Change Password state
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+
   // Manual review form
   const [triggerOwner, setTriggerOwner] = useState('');
   const [triggerRepo, setTriggerRepo] = useState('');
@@ -286,6 +295,10 @@ export default function Home() {
       const params = new URLSearchParams({ page: String(page), limit: '10' });
       if (statusFilter) params.set('status', statusFilter);
       const res = await fetch(`/api/reviews?${params}`);
+      if (res.status === 401) {
+        window.location.href = '/auth/login';
+        return;
+      }
       const data = await res.json();
       setReviews(data.reviews || []);
       setTotalPages(data.pagination?.totalPages || 1);
@@ -300,6 +313,10 @@ export default function Home() {
   const fetchConfig = useCallback(async () => {
     try {
       const res = await fetch('/api/config');
+      if (res.status === 401) {
+        window.location.href = '/auth/login';
+        return;
+      }
       const data = await res.json();
       setConfig(data);
       // Initialize state from config
@@ -437,6 +454,56 @@ export default function Home() {
     }
   };
 
+  // Logout handler
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/auth/login';
+    } catch {
+      // Force redirect even if logout API fails
+      window.location.href = '/auth/login';
+    }
+  };
+
+  // Change password handler
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword || !confirmNewPassword) {
+      toast.error('Please fill in all password fields');
+      return;
+    }
+    if (newPassword.length < 8) {
+      toast.error('New password must be at least 8 characters');
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      toast.error('New passwords do not match');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      const res = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        toast.success('Password changed successfully');
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmNewPassword('');
+      } else {
+        toast.error(data.error || 'Failed to change password');
+      }
+    } catch {
+      toast.error('Failed to change password');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
   // Calculate stats
   const totalReviews = reviews.length;
   const approved = reviews.filter((r) => r.overallScore === 'approve').length;
@@ -473,8 +540,8 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="gap-1">
-              <Github className="h-3 w-3" />
-              GitHub App
+              <Shield className="h-3 w-3" />
+              Admin
             </Badge>
             <Button
               variant="ghost"
@@ -483,6 +550,15 @@ export default function Home() {
               title="Refresh reviews"
             >
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleLogout}
+              title="Sign out"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </div>
@@ -1415,11 +1491,84 @@ export default function Home() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* 5. Account / Change Password */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <KeyRound className="h-5 w-5" />
+                  Account
+                </CardTitle>
+                <CardDescription>
+                  Change your admin password or sign out of the dashboard
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="current-password">Current Password</Label>
+                  <Input
+                    id="current-password"
+                    type="password"
+                    placeholder="Enter current password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="new-password">New Password</Label>
+                  <Input
+                    id="new-password"
+                    type="password"
+                    placeholder="At least 8 characters"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="confirm-new-password">Confirm New Password</Label>
+                  <Input
+                    id="confirm-new-password"
+                    type="password"
+                    placeholder="Re-enter new password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <Button
+                    onClick={handleChangePassword}
+                    disabled={changingPassword || !currentPassword || !newPassword || !confirmNewPassword}
+                  >
+                    {changingPassword ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Changing...
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="h-4 w-4 mr-2" />
+                        Change Password
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleLogout}
+                    className="text-destructive hover:text-destructive"
+                  >
+                    <LogOut className="h-4 w-4 mr-2" />
+                    Sign Out
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       </main>
 
-      {/* Footer */}
       <footer className="border-t py-4 mt-auto">
         <div className="container mx-auto px-4 flex items-center justify-between text-sm text-muted-foreground">
           <p>AI PR Reviewer — Automated code review powered by AI</p>
