@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  ai-pr-reviewer:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=file:./data/reviewer.db
+      - NODE_ENV=production
+    volumes:
+      - pr-reviewer-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  pr-reviewer-data:
