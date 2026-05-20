@@ -57,53 +57,57 @@ async function triggerGitHubReview(owner: string, repo: string, prNumber: number
     },
   });
 
-  (async () => {
-    try {
-      const diff = await fetchPRDiff(owner, repo, prNumber);
-      const result = await reviewPR(diff, prInfo, { platform: 'github', owner, repo, prNumber, diff });
+  // Synchronous processing — user is waiting, so we wait for completion
+  // This is serverless-compatible: the function stays alive until done.
+  try {
+    const diff = await fetchPRDiff(owner, repo, prNumber);
+    const result = await reviewPR(diff, prInfo, { platform: 'github', owner, repo, prNumber, diff });
 
-      await db.review.update({
-        where: { id: review.id },
-        data: {
-          status: 'completed',
-          summary: result.summary,
-          overallScore: result.overallScore,
-          agentSteps: JSON.stringify(result.agentSteps),
-          modelUsed: result.modelUsed,
-          tokensUsed: result.tokensUsed,
-        },
-      });
+    await db.review.update({
+      where: { id: review.id },
+      data: {
+        status: 'completed',
+        summary: result.summary,
+        overallScore: result.overallScore,
+        agentSteps: JSON.stringify(result.agentSteps),
+        modelUsed: result.modelUsed,
+        tokensUsed: result.tokensUsed,
+      },
+    });
 
-      if (result.comments.length > 0) {
-        await db.reviewComment.createMany({
-          data: result.comments.map((c) => ({
-            reviewId: review.id, filePath: c.filePath, line: c.line, side: c.side, body: c.body, severity: c.severity,
-          })),
-        });
-      }
-
-      try {
-        const eventMap: Record<string, 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'> = {
-          approve: 'APPROVE', request_changes: 'REQUEST_CHANGES', comment: 'COMMENT',
-        };
-        const ghEvent = eventMap[result.overallScore] || 'COMMENT';
-        const ghComments = result.comments.filter((c) => c.line != null).map((c) => ({
-          path: c.filePath, line: c.line!, side: c.side || 'RIGHT', body: `[**${c.severity?.toUpperCase() || 'INFO'}**] ${c.body}`,
-        }));
-        await postPRReview(owner, repo, prNumber, result.summary, ghEvent, ghComments);
-      } catch (postError) {
-        console.error('Failed to post review to GitHub:', postError);
-      }
-    } catch (error) {
-      console.error('Review processing failed:', error);
-      await db.review.update({
-        where: { id: review.id },
-        data: { status: 'failed', summary: error instanceof Error ? error.message : 'Review processing failed' },
+    if (result.comments.length > 0) {
+      await db.reviewComment.createMany({
+        data: result.comments.map((c) => ({
+          reviewId: review.id, filePath: c.filePath, line: c.line, side: c.side, body: c.body, severity: c.severity,
+        })),
       });
     }
-  })();
 
-  return NextResponse.json({ message: 'Review started', reviewId: review.id });
+    try {
+      const eventMap: Record<string, 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'> = {
+        approve: 'APPROVE', request_changes: 'REQUEST_CHANGES', comment: 'COMMENT',
+      };
+      const ghEvent = eventMap[result.overallScore] || 'COMMENT';
+      const ghComments = result.comments.filter((c) => c.line != null).map((c) => ({
+        path: c.filePath, line: c.line!, side: c.side || 'RIGHT', body: `[**${c.severity?.toUpperCase() || 'INFO'}**] ${c.body}`,
+      }));
+      await postPRReview(owner, repo, prNumber, result.summary, ghEvent, ghComments);
+    } catch (postError) {
+      console.error('Failed to post review to GitHub:', postError);
+    }
+
+    return NextResponse.json({ message: 'Review completed', reviewId: review.id, status: 'completed' });
+  } catch (error) {
+    console.error('Review processing failed:', error);
+    await db.review.update({
+      where: { id: review.id },
+      data: { status: 'failed', summary: error instanceof Error ? error.message : 'Review processing failed' },
+    });
+    return NextResponse.json(
+      { error: `Review failed: ${error instanceof Error ? error.message : 'Unknown error'}`, reviewId: review.id, status: 'failed' },
+      { status: 500 }
+    );
+  }
 }
 
 async function triggerGitLabReview(owner: string, repo: string, mrIid: number) {
@@ -132,59 +136,62 @@ async function triggerGitLabReview(owner: string, repo: string, mrIid: number) {
     },
   });
 
-  (async () => {
-    try {
-      const diff = await fetchMRDiff(owner, repo, mrIid);
-      const result = await reviewPR(diff, {
-        title: mrInfo.title, author: mrInfo.author, body: mrInfo.description,
-        baseBranch: mrInfo.targetBranch, headBranch: mrInfo.sourceBranch,
-        additions: mrInfo.additions, deletions: mrInfo.deletions, changedFiles: mrInfo.changedFiles,
-      }, { platform: 'gitlab', owner, repo, prNumber: mrIid, diff });
+  // Synchronous processing — user is waiting
+  try {
+    const diff = await fetchMRDiff(owner, repo, mrIid);
+    const result = await reviewPR(diff, {
+      title: mrInfo.title, author: mrInfo.author, body: mrInfo.description,
+      baseBranch: mrInfo.targetBranch, headBranch: mrInfo.sourceBranch,
+      additions: mrInfo.additions, deletions: mrInfo.deletions, changedFiles: mrInfo.changedFiles,
+    }, { platform: 'gitlab', owner, repo, prNumber: mrIid, diff });
 
-      await db.review.update({
-        where: { id: review.id },
-        data: {
-          status: 'completed', summary: result.summary, overallScore: result.overallScore,
-          agentSteps: JSON.stringify(result.agentSteps), modelUsed: result.modelUsed, tokensUsed: result.tokensUsed,
-        },
-      });
+    await db.review.update({
+      where: { id: review.id },
+      data: {
+        status: 'completed', summary: result.summary, overallScore: result.overallScore,
+        agentSteps: JSON.stringify(result.agentSteps), modelUsed: result.modelUsed, tokensUsed: result.tokensUsed,
+      },
+    });
 
-      if (result.comments.length > 0) {
-        await db.reviewComment.createMany({
-          data: result.comments.map((c) => ({
-            reviewId: review.id, filePath: c.filePath, line: c.line, side: c.side, body: c.body, severity: c.severity,
-          })),
-        });
-      }
-
-      try {
-        const scoreEmoji: Record<string, string> = { approve: '✅', request_changes: '⚠️', comment: '💬' };
-        await postMRNote(owner, repo, mrIid, `## AI Review ${scoreEmoji[result.overallScore] || '💬'}\n\n${result.summary}\n\n---\n*Powered by AI PR Reviewer*`);
-        for (const comment of result.comments) {
-          if (comment.line != null && mrInfo.baseSha && mrInfo.headSha && mrInfo.startSha) {
-            try {
-              await postMRDiscussion(owner, repo, mrIid, `[**${comment.severity?.toUpperCase() || 'INFO'}**] ${comment.body}`, {
-                base_sha: mrInfo.baseSha, head_sha: mrInfo.headSha, start_sha: mrInfo.startSha,
-                position_type: 'text', new_path: comment.filePath, new_line: comment.line,
-              });
-            } catch {
-              await postMRNote(owner, repo, mrIid, `**${comment.filePath}:${comment.line}** [${comment.severity?.toUpperCase() || 'INFO'}] ${comment.body}`);
-            }
-          } else {
-            await postMRNote(owner, repo, mrIid, `**${comment.filePath}${comment.line ? `:${comment.line}` : ''}** [${comment.severity?.toUpperCase() || 'INFO'}] ${comment.body}`);
-          }
-        }
-      } catch (postError) {
-        console.error('Failed to post review to GitLab:', postError);
-      }
-    } catch (error) {
-      console.error('GitLab review processing failed:', error);
-      await db.review.update({
-        where: { id: review.id },
-        data: { status: 'failed', summary: error instanceof Error ? error.message : 'Review processing failed' },
+    if (result.comments.length > 0) {
+      await db.reviewComment.createMany({
+        data: result.comments.map((c) => ({
+          reviewId: review.id, filePath: c.filePath, line: c.line, side: c.side, body: c.body, severity: c.severity,
+        })),
       });
     }
-  })();
 
-  return NextResponse.json({ message: 'Review started', reviewId: review.id });
+    try {
+      const scoreEmoji: Record<string, string> = { approve: 'Approved', request_changes: 'Changes requested', comment: 'Commented' };
+      await postMRNote(owner, repo, mrIid, `## AI Review ${scoreEmoji[result.overallScore] || 'Commented'}\n\n${result.summary}\n\n---\n*Powered by CodeSentinel AI PR Reviewer*`);
+      for (const comment of result.comments) {
+        if (comment.line != null && mrInfo.baseSha && mrInfo.headSha && mrInfo.startSha) {
+          try {
+            await postMRDiscussion(owner, repo, mrIid, `[**${comment.severity?.toUpperCase() || 'INFO'}**] ${comment.body}`, {
+              base_sha: mrInfo.baseSha, head_sha: mrInfo.headSha, start_sha: mrInfo.startSha,
+              position_type: 'text', new_path: comment.filePath, new_line: comment.line,
+            });
+          } catch {
+            await postMRNote(owner, repo, mrIid, `**${comment.filePath}:${comment.line}** [${comment.severity?.toUpperCase() || 'INFO'}] ${comment.body}`);
+          }
+        } else {
+          await postMRNote(owner, repo, mrIid, `**${comment.filePath}${comment.line ? `:${comment.line}` : ''}** [${comment.severity?.toUpperCase() || 'INFO'}] ${comment.body}`);
+        }
+      }
+    } catch (postError) {
+      console.error('Failed to post review to GitLab:', postError);
+    }
+
+    return NextResponse.json({ message: 'Review completed', reviewId: review.id, status: 'completed' });
+  } catch (error) {
+    console.error('GitLab review processing failed:', error);
+    await db.review.update({
+      where: { id: review.id },
+      data: { status: 'failed', summary: error instanceof Error ? error.message : 'Review processing failed' },
+    });
+    return NextResponse.json(
+      { error: `Review failed: ${error instanceof Error ? error.message : 'Unknown error'}`, reviewId: review.id, status: 'failed' },
+      { status: 500 }
+    );
+  }
 }

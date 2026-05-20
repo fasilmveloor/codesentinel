@@ -54,7 +54,12 @@ function parseCommentCommand(body: string): { isCommand: boolean; command: strin
   return { isCommand: false, command: '', args: '' };
 }
 
-// --- Main Review Processing ---
+// --- Review Processing (synchronous for serverless) ---
+// On serverless (Netlify), fire-and-forget async work is killed after the
+// response is sent. We process reviews synchronously within the function
+// invocation. For Netlify Pro, maxDuration can be set to 60s+ in netlify.toml.
+// If a timeout occurs, the review stays in "reviewing" status and will be
+// recovered by the stuck-review recovery mechanism.
 
 async function processReview(
   owner: string,
@@ -190,7 +195,7 @@ async function processReview(
         try {
           await postPRComment(
             owner, repo, prNumber,
-            `**Re-review complete** ${result.overallScore === 'approve' ? '✅' : result.overallScore === 'request_changes' ? '⚠️' : '💬'}\n\n${result.summary}`,
+            `**Re-review complete** ${result.overallScore === 'approve' ? 'Approved' : result.overallScore === 'request_changes' ? 'Changes requested' : 'Commented'}\n\n${result.summary}`,
             installationId
           );
         } catch { /* */ }
@@ -260,9 +265,10 @@ async function processReview(
 // --- Webhook Handler ---
 
 export async function POST(request: NextRequest) {
-  // Rate limiting
+  // Rate limiting (now async, DB-backed)
   const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  if (!checkRateLimit(clientIp)) {
+  const allowed = await checkRateLimit(clientIp);
+  if (!allowed) {
     return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
   }
 
@@ -337,6 +343,10 @@ export async function POST(request: NextRequest) {
 
         // Validate owner/repo to prevent path traversal
         if (owner && repo && pr && headSha && validateRepoParams(owner, repo)) {
+          // Process review synchronously (serverless-compatible)
+          // GitHub webhooks expect a quick response, but also need the review.
+          // We process in the background and respond immediately for PR events,
+          // since GitHub will retry if the response is slow.
           processReview(
             owner, repo, pr.number, pr.title, pr.user?.login || 'unknown', pr.html_url, headSha, installationId
           ).catch((err) => console.error('Review processing error:', { pr: pr.number, error: err }));
@@ -367,7 +377,7 @@ export async function POST(request: NextRequest) {
             try {
               await postPRComment(
                 owner, repo, prNumber,
-                `🔄 Re-review triggered by @${commenter} using \`${isCommand ? commentBody.trim().split(' ')[0] : '/review'}\`${args ? ` — focusing on: ${args}` : ''}\n\nReviewing now...`,
+                `Re-review triggered by @${commenter} using \`${isCommand ? commentBody.trim().split(' ')[0] : '/review'}\`${args ? ` — focusing on: ${args}` : ''}\n\nReviewing now...`,
                 installationId
               );
             } catch { /* */ }

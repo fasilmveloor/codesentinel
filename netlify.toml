@@ -1,0 +1,47 @@
+# CodeSentinel — Netlify Deployment Configuration
+# See docs: https://docs.netlify.com/configure-builds/file-based-configuration/
+
+[build]
+  command = """
+    npx prisma generate && \
+    npx prisma migrate deploy && \
+    npm run build
+  """
+  publish = ".next"
+
+# Use the Netlify Next.js runtime plugin
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# Environment variables that must be set in Netlify UI:
+# - DATABASE_URL         (PostgreSQL connection string, e.g. from Neon)
+# - JWT_SECRET           (32+ char random string for JWT signing)
+# - ai_api_key           (set via app UI after deploy)
+# - github_token         (set via app UI after deploy)
+# - webhook_secret       (set via app UI after deploy)
+
+# Increase function timeout for AI review processing (Pro plan)
+# Free tier: 10s, Pro: 26s default, can extend to 60s with maxDuration
+[functions]
+  node_bundler = "esbuild"
+
+# Set longer timeout for API routes that do AI review processing
+# Netlify Pro required for maxDuration > 10s
+[functions."api/*"]
+  maxDuration = 60
+
+# Headers for security
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+# Redirects for SPA routing (Next.js handles this, but just in case)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+  conditions = {Role = ["admin"]}

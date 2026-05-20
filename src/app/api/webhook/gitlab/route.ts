@@ -7,9 +7,9 @@ async function processGitLabReview(
   owner: string,
   repo: string,
   mrIid: number,
-  mrTitle: string,
-  mrAuthor: string,
-  mrUrl: string,
+  prTitle: string,
+  prAuthor: string,
+  prUrl: string,
   host?: string
 ) {
   let reviewId: string | undefined;
@@ -77,8 +77,8 @@ async function processGitLabReview(
     }
 
     try {
-      const scoreEmoji: Record<string, string> = { approve: '✅', request_changes: '⚠️', comment: '💬' };
-      const noteBody = `## AI Review ${scoreEmoji[result.overallScore] || '💬'}\n\n${result.summary}\n\n---\n*Powered by AI PR Reviewer*`;
+      const scoreEmoji: Record<string, string> = { approve: 'Approved', request_changes: 'Changes requested', comment: 'Commented' };
+      const noteBody = `## AI Review ${scoreEmoji[result.overallScore] || 'Commented'}\n\n${result.summary}\n\n---\n*Powered by CodeSentinel AI PR Reviewer*`;
       await postMRNote(owner, repo, mrIid, noteBody, host);
 
       for (const comment of result.comments) {
