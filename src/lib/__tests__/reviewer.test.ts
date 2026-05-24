@@ -1,63 +1,13 @@
 import { describe, it, expect } from 'vitest';
-
-// Replicate parseReviewFromContent and buildReviewResult logic for isolated testing
-// These mirror the actual implementations in reviewer.ts
-
-function parseReviewFromContent(content: string): Record<string, unknown> | null {
-  const jsonMatch = content.match(/```json\s*([\s\S]*?)```/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[1].trim());
-      if (parsed.action === 'final_review' || parsed.overallScore) return parsed;
-    } catch { /* */ }
-  }
-  try {
-    const parsed = JSON.parse(content.trim());
-    if (parsed.action === 'final_review' || parsed.overallScore) return parsed;
-  } catch { /* */ }
-  return null;
-}
-
-interface AgentStep {
-  step: string;
-  description: string;
-  tool?: string;
-  timestamp: string;
-}
-
-function buildReviewResult(
-  parsed: Record<string, unknown>,
-  agentSteps: AgentStep[],
-  modelUsed: string,
-  totalTokens: number
-) {
-  agentSteps.push({
-    step: 'review',
-    description: `Produced final review: ${parsed.overallScore || 'comment'} with ${((parsed.comments || []) as Array<unknown>).length} comment(s)`,
-    timestamp: new Date().toISOString(),
-  });
-
-  return {
-    summary: (parsed.summary as string) || '',
-    overallScore: (parsed.overallScore as string) || 'comment',
-    comments: ((parsed.comments || []) as Array<Record<string, unknown>>).map((c) => ({
-      filePath: (c.filePath as string) || '',
-      line: (c.line as number) || null,
-      side: (c.side as string) || null,
-      body: (c.body as string) || '',
-      severity: (c.severity as string) || 'info',
-    })),
-    agentSteps,
-    modelUsed,
-    tokensUsed: totalTokens,
-  };
-}
+import { parseReviewFromContent, buildReviewResult } from '../reviewer';
+import type { AgentStep } from '../reviewer';
 
 describe('parseReviewFromContent', () => {
   describe('valid JSON in ```json code block', () => {
     it('should parse valid review with action=final_review', () => {
       const content = 'Some text before\n```json\n{"action": "final_review", "summary": "LGTM", "overallScore": "approve", "comments": []}\n```';
       const result = parseReviewFromContent(content);
+
       expect(result).not.toBeNull();
       expect(result!.action).toBe('final_review');
       expect(result!.summary).toBe('LGTM');
@@ -68,6 +18,7 @@ describe('parseReviewFromContent', () => {
     it('should parse valid review with overallScore but no action', () => {
       const content = '```json\n{"summary": "Needs work", "overallScore": "request_changes", "comments": [{"filePath": "a.ts", "line": 1, "body": "fix", "severity": "error"}]}\n```';
       const result = parseReviewFromContent(content);
+
       expect(result).not.toBeNull();
       expect(result!.overallScore).toBe('request_changes');
       expect(result!.comments).toHaveLength(1);
@@ -76,6 +27,7 @@ describe('parseReviewFromContent', () => {
     it('should handle JSON with whitespace around the code block', () => {
       const content = '```json\n  \n{"action": "final_review", "overallScore": "comment"}\n  \n```';
       const result = parseReviewFromContent(content);
+
       expect(result).not.toBeNull();
       expect(result!.overallScore).toBe('comment');
     });
@@ -83,12 +35,16 @@ describe('parseReviewFromContent', () => {
     it('should ignore JSON in code block that is not a review', () => {
       const content = '```json\n{"action": "tool_call", "tool": "fetch_file"}\n```';
       const result = parseReviewFromContent(content);
+
+      // Should fall through to raw JSON parsing and also not match there
       expect(result).toBeNull();
     });
 
-    it('should return null when code block has invalid JSON', () => {
+    it('should return null when code block has invalid JSON and raw content is also unparseable', () => {
       const content = '```json\n{not valid json}\n```\nSome text after';
       const result = parseReviewFromContent(content);
+
+      // The code block JSON is invalid, and the full content is also not valid JSON
       expect(result).toBeNull();
     });
   });
@@ -97,6 +53,7 @@ describe('parseReviewFromContent', () => {
     it('should parse raw JSON with action=final_review', () => {
       const content = '{"action": "final_review", "summary": "OK", "overallScore": "approve", "comments": []}';
       const result = parseReviewFromContent(content);
+
       expect(result).not.toBeNull();
       expect(result!.action).toBe('final_review');
       expect(result!.summary).toBe('OK');
@@ -105,6 +62,7 @@ describe('parseReviewFromContent', () => {
     it('should parse raw JSON with overallScore', () => {
       const content = '{"overallScore": "comment", "summary": "Looks fine"}';
       const result = parseReviewFromContent(content);
+
       expect(result).not.toBeNull();
       expect(result!.overallScore).toBe('comment');
     });
@@ -138,6 +96,8 @@ describe('parseReviewFromContent', () => {
     it('should prefer JSON from code block over raw JSON', () => {
       const content = '```json\n{"action": "final_review", "overallScore": "approve"}\n```\n{"action": "final_review", "overallScore": "request_changes"}';
       const result = parseReviewFromContent(content);
+
+      // Code block takes priority
       expect(result).not.toBeNull();
       expect(result!.overallScore).toBe('approve');
     });
@@ -151,12 +111,23 @@ describe('buildReviewResult', () => {
       summary: 'The PR looks good overall.',
       overallScore: 'approve',
       comments: [
-        { filePath: 'src/index.ts', line: 42, side: 'RIGHT', body: 'Consider using const here.', severity: 'info' },
+        {
+          filePath: 'src/index.ts',
+          line: 42,
+          side: 'RIGHT',
+          body: 'Consider using const here.',
+          severity: 'info',
+        },
       ],
     };
     const agentSteps: AgentStep[] = [
-      { step: 'analyze', description: 'Analyzing PR', timestamp: new Date().toISOString() },
+      {
+        step: 'analyze',
+        description: 'Analyzing PR',
+        timestamp: new Date().toISOString(),
+      },
     ];
+
     const result = buildReviewResult(parsed, agentSteps, 'test-model', 100);
 
     expect(result.summary).toBe('The PR looks good overall.');
@@ -172,30 +143,49 @@ describe('buildReviewResult', () => {
   });
 
   it('should default overallScore to "comment" when missing', () => {
-    const parsed = { summary: 'Some summary' };
+    const parsed = {
+      summary: 'Some summary',
+    };
     const agentSteps: AgentStep[] = [];
+
     const result = buildReviewResult(parsed, agentSteps, 'model', 50);
+
     expect(result.overallScore).toBe('comment');
   });
 
   it('should default summary to empty string when missing', () => {
-    const parsed = { overallScore: 'approve' };
+    const parsed = {
+      overallScore: 'approve',
+    };
     const agentSteps: AgentStep[] = [];
+
     const result = buildReviewResult(parsed, agentSteps, 'model', 0);
+
     expect(result.summary).toBe('');
   });
 
   it('should default comments to empty array when missing', () => {
-    const parsed = { overallScore: 'approve', summary: 'LGTM' };
+    const parsed = {
+      overallScore: 'approve',
+      summary: 'LGTM',
+    };
     const agentSteps: AgentStep[] = [];
+
     const result = buildReviewResult(parsed, agentSteps, 'model', 0);
+
     expect(result.comments).toEqual([]);
   });
 
   it('should default comment fields to safe values', () => {
-    const parsed = { overallScore: 'request_changes', summary: 'Fix needed', comments: [{}] };
+    const parsed = {
+      overallScore: 'request_changes',
+      summary: 'Fix needed',
+      comments: [{}], // Missing all fields
+    };
     const agentSteps: AgentStep[] = [];
+
     const result = buildReviewResult(parsed, agentSteps, 'model', 0);
+
     expect(result.comments).toHaveLength(1);
     expect(result.comments[0].filePath).toBe('');
     expect(result.comments[0].line).toBeNull();
@@ -205,9 +195,16 @@ describe('buildReviewResult', () => {
   });
 
   it('should append a review step to agentSteps', () => {
-    const parsed = { overallScore: 'approve', summary: 'OK', comments: [] };
+    const parsed = {
+      overallScore: 'approve',
+      summary: 'OK',
+      comments: [],
+    };
     const agentSteps: AgentStep[] = [];
+
     buildReviewResult(parsed, agentSteps, 'model', 0);
+
+    // buildReviewResult pushes a step to the agentSteps array
     expect(agentSteps).toHaveLength(1);
     expect(agentSteps[0].step).toBe('review');
     expect(agentSteps[0].description).toContain('approve');
@@ -220,9 +217,15 @@ describe('buildReviewResult', () => {
       summary: 'Needs fixes',
       comments: [{ filePath: 'a.ts', line: 1, body: 'error', severity: 'error' }],
     };
-    const existingStep: AgentStep = { step: 'analyze', description: 'Analyzed PR', timestamp: new Date().toISOString() };
+    const existingStep: AgentStep = {
+      step: 'analyze',
+      description: 'Analyzed PR',
+      timestamp: new Date().toISOString(),
+    };
     const agentSteps: AgentStep[] = [existingStep];
+
     const result = buildReviewResult(parsed, agentSteps, 'model', 42);
+
     expect(result.agentSteps).toHaveLength(2);
     expect(result.agentSteps[0].step).toBe('analyze');
     expect(result.agentSteps[1].step).toBe('review');
@@ -238,12 +241,33 @@ describe('buildReviewResult', () => {
       ],
     };
     const agentSteps: AgentStep[] = [];
+
     const result = buildReviewResult(parsed, agentSteps, 'model', 200);
+
     expect(result.comments).toHaveLength(2);
+    // First comment: line and side default to null
     expect(result.comments[0].line).toBeNull();
     expect(result.comments[0].side).toBeNull();
     expect(result.comments[0].severity).toBe('warning');
+    // Second comment: severity defaults to 'info'
     expect(result.comments[1].severity).toBe('info');
     expect(result.comments[1].side).toBe('LEFT');
+  });
+
+  it('should describe comment count in the review step', () => {
+    const parsed = {
+      overallScore: 'request_changes',
+      summary: 'Issues found',
+      comments: [
+        { filePath: 'a.ts', body: 'fix this' },
+        { filePath: 'b.ts', body: 'and this' },
+        { filePath: 'c.ts', body: 'also this' },
+      ],
+    };
+    const agentSteps: AgentStep[] = [];
+
+    buildReviewResult(parsed, agentSteps, 'model', 300);
+
+    expect(agentSteps[0].description).toContain('3 comment(s)');
   });
 });
