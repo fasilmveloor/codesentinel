@@ -1,5 +1,10 @@
 # CodeSentinel
 
+[![CI](https://github.com/your-org/codesentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/codesentinel/actions/workflows/ci.yml)
+[![Tests](https://github.com/your-org/codesentinel/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/your-org/codesentinel/actions/workflows/ci.yml)
+[![Lint](https://github.com/your-org/codesentinel/actions/workflows/lint.yml/badge.svg)](https://github.com/your-org/codesentinel/actions/workflows/lint.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **AI-Powered Code Review Agent for GitHub & GitLab**
 
 CodeSentinel is a self-hosted, AI-driven code review tool that automatically reviews Pull Requests on GitHub and Merge Requests on GitLab. Powered by a two-phase AI agent (Investigate → Review) with tool-use capabilities, it provides deep, contextual code analysis — not just surface-level linting.
@@ -15,7 +20,7 @@ Built with Next.js 16, Prisma, SQLite, and a configurable AI backend (Zen/Oencod
 | Generic linters miss logic bugs, security holes, and architectural issues | Two-phase AI agent investigates code context before reviewing — it fetches files, searches patterns, checks tests, and analyzes dependencies |
 | Commercial review tools are expensive and opaque | Self-hosted, open-source, configurable AI provider — you control the model, the data, and the cost |
 | Review bots spam every line with low-value comments | Agent only comments on real issues with severity levels (critical → info), and provides actionable, constructive feedback |
-| Can't interact with the reviewer like Claude/Gemini PR agents | Interactive slash commands (`/review`, `/fix`, `/explain`, `/ignore`, `/config`, `/help`) in PR comment threads |
+| Can't interact with the reviewer like Claude/Gemini PR agents | Interactive slash commands (`/review`, `/fix`, `/explain`, `/ignore`, `/config`, `/help`, `/recheck`, `/check`, `/re-review`, `/review again`) in PR comment threads |
 | Merge blocking is all-or-nothing | Per-repository configurable merge protection — OFF by default, opt-in per repo via dashboard or config |
 
 ---
@@ -24,7 +29,7 @@ Built with Next.js 16, Prisma, SQLite, and a configurable AI backend (Zen/Oencod
 
 ### Core Review Engine
 - **Two-Phase AI Agent** — Investigate phase gathers context using tools, then Review phase produces structured output with inline comments
-- **4 Agent Tools** — `fetch_file`, `search_pattern`, `check_tests`, `analyze_deps` — the agent decides which tools to call and when
+- **8 Agent Tools** — `fetch_file`, `search_pattern`, `check_tests`, `analyze_deps`, `file_relationships`, `historical_context`, `symbol_search`, `architectural_impact` — the agent decides which tools to call and when
 - **Structured Output** — Reviews include summary, overall score (approve/request_changes/comment), inline comments with file paths and line numbers, and severity ratings
 - **Configurable AI Backend** — Use Zen/Oencode models (OpenAI-compatible API) or z-ai-web-dev-sdk with custom model, temperature, and max agent steps
 
@@ -40,6 +45,10 @@ Built with Next.js 16, Prisma, SQLite, and a configurable AI backend (Zen/Oencod
 - `/ignore` — Tell the agent to ignore a file or pattern
 - `/config` — View or update per-repository review settings
 - `/help` — Show available commands
+- `/recheck` — Re-review after changes
+- `/check` — Quick check on a specific file or concern
+- `/re-review` — Full re-review of the PR/MR
+- `/review again` — Alias for re-review
 
 ### Merge Protection
 - **GitHub Check Runs** — Creates `in_progress` → `completed` check runs with pass/fail/neutral conclusions
@@ -81,11 +90,24 @@ Built with Next.js 16, Prisma, SQLite, and a configurable AI backend (Zen/Oencod
 │                    │       │         └──────────────┘   │       │
 │                    │       ▼                            │       │
 │                    │  ┌─────────────────────────┐       │       │
-│                    │  │     Agent Tools          │       │       │
+│                    │  │     Agent Tools (8)      │       │       │
 │                    │  │  • fetch_file            │       │       │
 │                    │  │  • search_pattern        │       │       │
 │                    │  │  • check_tests           │       │       │
 │                    │  │  • analyze_deps          │       │       │
+│                    │  │  • file_relationships    │       │       │
+│                    │  │  • historical_context    │       │       │
+│                    │  │  • symbol_search         │       │       │
+│                    │  │  • architectural_impact  │       │       │
+│                    │  └─────────────────────────┘       │       │
+│                    │                                     │       │
+│                    │  ┌─────────────────────────┐       │       │
+│                    │  │   Hallucination Guards   │       │       │
+│                    │  │  • File path validation  │       │       │
+│                    │  │  • Line number checks    │       │       │
+│                    │  │  • Comment count cap     │       │       │
+│                    │  │  • ReDoS protection      │       │       │
+│                    │  │  • Retry with backoff    │       │       │
 │                    │  └─────────────────────────┘       │       │
 │                    └─────────────┬───────────────────────┘       │
 │                                  │                               │
@@ -153,7 +175,18 @@ PR/MR Event (webhook)
 │       │          │search_pat             │       │
 │       │          │check_test             │       │
 │       │          │analyze_dep            │       │
+│       │          │symbol_search          │       │
+│       │          │file_relati            │       │
+│       │          │blast_radius           │       │
 │       │          └─────────┘             │       │
+└──────────────────────────┬───────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────┐
+│         Hallucination Guard Validation           │
+│  • Filter comments with invalid file paths       │
+│  • Cap comment count to prevent spam             │
+│  • Ensure summary is present                     │
 └──────────────────────────┬───────────────────────┘
                            │
                            ▼
@@ -173,17 +206,59 @@ PR/MR Event (webhook)
 | Layer | Technology |
 |---|---|
 | **Framework** | Next.js 16 (App Router, RSC, standalone output) |
-| **Language** | TypeScript 5 |
-| **Runtime** | Bun (dev/build), Node 20 Alpine (Docker) |
+| **Language** | TypeScript 5 (strict mode, noImplicitAny) |
+| **Runtime** | Bun (dev), Node 20 Alpine (Docker) |
 | **Database** | SQLite via Prisma ORM 6 |
-| **UI** | React 19, Tailwind CSS 4, shadcn/ui (48 components) |
-| **Animation** | Framer Motion |
+| **UI** | React 19, Tailwind CSS 4, shadcn/ui (55 components) |
+| **Animation** | Framer Motion 11 |
 | **AI SDK** | `z-ai-web-dev-sdk` + OpenAI-compatible API (Zen/Oencode) |
-| **State** | React hooks, TanStack React Query + Table |
-| **Forms** | React Hook Form + Zod validation |
 | **Icons** | Lucide React |
 | **Toast** | Sonner |
+| **Testing** | Vitest (unit + evaluation benchmarks) |
+| **CI/CD** | GitHub Actions (lint, test, build) |
 | **Deployment** | Docker (multi-stage), Caddy reverse proxy, docker-compose |
+
+---
+
+## Stateless Architecture
+
+CodeSentinel uses a **stateless, JWT-based architecture** for authentication and a **database-backed** approach for rate limiting — no in-memory sessions or server-side state required.
+
+### Authentication (JWT)
+- Sessions are encoded as **HS256 JWT tokens** stored in HttpOnly cookies — no server-side session storage needed
+- JWT secret is auto-generated on first boot and persisted in the database, surviving server restarts
+- Token verification uses `crypto.timingSafeEqual` to prevent timing attacks
+- Sessions expire after 7 days (configurable)
+- Works correctly across multiple serverless instances or container restarts
+
+### Rate Limiting (DB-Backed)
+- Rate limit counters are stored in the **AppConfig** SQLite table, keyed by IP address
+- Each entry stores `count:resetTime` and is automatically cleaned up after the window expires
+- Works across serverless instances and survives server restarts (unlike in-memory rate limiters)
+- Fails open: if the database is unavailable, requests are allowed through
+- Default: 30 requests per minute per IP
+
+---
+
+## Structured Logging
+
+CodeSentinel includes a built-in structured logger (`src/lib/logger.ts`) with the following features:
+
+- **Log Levels**: `debug`, `info`, `warn`, `error` — controlled via `LOG_LEVEL` env var
+- **Context Propagation**: Create child loggers with `logger.child({ component: 'reviewer' })` that inherit parent context
+- **Production Mode**: Outputs structured JSON for easy ingestion by log aggregators (Datadog, CloudWatch, etc.)
+- **Development Mode**: Pretty-printed, human-readable format with component tags and key=value pairs
+- **Environment-Aware**: Defaults to `debug` in development, `info` in production
+
+Example production log output:
+```json
+{"level":"info","timestamp":"2025-01-15T10:30:00.000Z","component":"reviewer","message":"Review completed","durationMs":4500,"steps":7}
+```
+
+Example development log output:
+```
+[INFO] 2025-01-15T10:30:00.000Z [reviewer] Review completed durationMs=4500 steps=7
+```
 
 ---
 
@@ -227,7 +302,7 @@ PR/MR Event (webhook)
                      └────────────────────┘
 ```
 
-**AppConfig** — Key-value store for all configuration (tokens, AI settings, webhook secrets, merge protection toggle). Sensitive values are masked in API responses.
+**AppConfig** — Key-value store for all configuration (tokens, AI settings, webhook secrets, merge protection toggle, JWT secret, rate limit counters). Sensitive values are masked in API responses.
 
 **Repository** — Tracked GitHub/GitLab repositories. GitHub repos store `installationId`; GitLab repos store `gitlabHost` (for self-hosted instances).
 
@@ -263,19 +338,48 @@ codesentinel/
 │   │   ├── layout.tsx             # Root layout (Geist fonts, Sonner)
 │   │   └── page.tsx               # Dashboard SPA (3 tabs)
 │   ├── components/
-│   │   └── ui/                    # 48 shadcn/ui components
+│   │   ├── ui/                    # 55 shadcn/ui components
+│   │   ├── badges.tsx             # Severity & status badge components
+│   │   ├── stat-card.tsx          # Dashboard stat card component
+│   │   ├── review-detail-dialog.tsx # Full review detail dialog
+│   │   ├── dashboard/
+│   │   │   ├── dashboard-tab.tsx  # Main dashboard overview tab
+│   │   │   └── manual-review-tab.tsx # Manual review trigger tab
+│   │   ├── settings/
+│   │   │   └── settings-tab.tsx   # Settings & configuration tab
+│   │   └── layout/
+│   │       ├── header.tsx         # App header component
+│   │       └── footer.tsx         # App footer component
 │   ├── hooks/
 │   │   ├── use-mobile.ts          # Responsive breakpoint hook
 │   │   └── use-toast.ts           # Toast state management
-│   └── lib/
-│       ├── db.ts                  # Prisma client singleton
-│       ├── utils.ts               # cn() helper (clsx + tailwind-merge)
-│       ├── github.ts              # GitHub API: JWT auth, PR ops, Check Runs
-│       ├── gitlab.ts              # GitLab API: MR ops, discussions, notes
-│       └── reviewer.ts            # AI review engine: agent loop, tools, output parsing
+│   ├── lib/
+│   │   ├── db.ts                  # Prisma client singleton
+│   │   ├── utils.ts               # cn() helper (clsx + tailwind-merge)
+│   │   ├── constants.ts           # Magic number constants & limits
+│   │   ├── logger.ts              # Structured logger (JSON in prod)
+│   │   ├── auth.ts                # JWT auth, password hashing, sessions
+│   │   ├── rate-limit.ts          # DB-backed rate limiter
+│   │   ├── format.ts              # Date formatting & key labels
+│   │   ├── types.ts               # Shared TypeScript interfaces
+│   │   ├── github.ts              # GitHub API: JWT auth, PR ops, Check Runs
+│   │   ├── gitlab.ts              # GitLab API: MR ops, discussions, notes
+│   │   ├── reviewer.ts            # AI review engine: agent loop, tools, hallucination guards
+│   │   └── __tests__/
+│   │       ├── constants.test.ts  # Constants validation tests
+│   │       ├── auth.test.ts       # Auth & JWT tests
+│   │       ├── rate-limit.test.ts # Rate limiter tests
+│   │       ├── reviewer.test.ts   # Review parsing & building tests
+│   │       ├── reviewer-tools.test.ts # Agent tool logic tests
+│   │       ├── github.test.ts     # GitHub integration tests
+│   │       ├── webhook-validation.test.ts # Webhook signature tests
+│   │       └── evaluation-benchmarks.test.ts # AI review quality benchmarks
+│   └── types/
+│       └── index.ts               # Shared type definitions
 ├── public/
 │   ├── logo.svg
 │   └── robots.txt
+├── vitest.config.ts               # Vitest configuration
 ├── Dockerfile                     # Multi-stage build (deps → build → run)
 ├── docker-compose.yml             # Single service + persistent volume
 ├── Caddyfile                      # Reverse proxy config
@@ -316,6 +420,22 @@ bun run dev
 ```
 
 The app will be available at `http://localhost:3000`.
+
+### Running Tests
+
+```bash
+# Run all tests with Vitest
+npx vitest run
+
+# Run tests in watch mode
+npx vitest
+
+# Run a specific test file
+npx vitest run src/lib/__tests__/reviewer.test.ts
+
+# Run evaluation benchmarks
+npx vitest run src/lib/__tests__/evaluation-benchmarks.test.ts
+```
 
 ### Using Docker
 
@@ -393,6 +513,8 @@ If you don't want to set up a GitHub App, you can use a Personal Access Token wi
 |---|---|---|---|
 | `DATABASE_URL` | Yes | — | SQLite file path (e.g., `file:./data/reviewer.db`) or PostgreSQL URL |
 | `NODE_ENV` | No | `development` | `production` for Docker builds |
+| `LOG_LEVEL` | No | `debug`/`info` | Log level (debug in dev, info in prod) |
+| `COOKIE_SECURE` | No | — | Set to `true` to enable Secure flag on session cookies |
 
 All other settings (tokens, AI config, etc.) are stored in the database and managed through the UI.
 
@@ -402,7 +524,7 @@ All other settings (tokens, AI config, etc.) are stored in the database and mana
 
 ### `GET /api`
 
-Health check endpoint. Returns `{ status: "ok" }`.
+Health check endpoint. Returns `{ status: "ok", service: "codesentinel", version: "0.2.0" }`.
 
 ### `GET /api/config`
 
@@ -470,6 +592,7 @@ GitHub webhook endpoint. Handles events:
 - `installation_repositories` — Added/removed repos
 - `pull_request` — Opened/synchronize (triggers review)
 - `check_run` — Rerequested (re-runs review)
+- `issue_comment` — PR comments with slash commands (`/review`, `/recheck`, `/check`, `/re-review`, `/review again`)
 
 Verifies `X-Hub-Signature-256` HMAC-SHA256 signature if webhook secret is configured.
 
@@ -477,6 +600,7 @@ Verifies `X-Hub-Signature-256` HMAC-SHA256 signature if webhook secret is config
 
 GitLab webhook endpoint. Handles:
 - `Merge Request Hook` — Open/update/reopen (triggers review)
+- `Note Hook` — MR comments with slash commands (`/review`, `/recheck`, `/check`, `/re-review`)
 
 Verifies `X-Gitlab-Token` if webhook secret is configured.
 
@@ -493,9 +617,13 @@ The agent receives the PR/MR diff and metadata, then decides whether to use tool
 | Tool | Purpose | Parameters |
 |---|---|---|
 | `fetch_file` | Fetch full file content from the repository | `filePath`, `ref` (optional) |
-| `search_pattern` | Search for a regex pattern in the diff | `pattern` |
+| `search_pattern` | Search for a regex pattern in the diff (with ReDoS protection) | `pattern` |
 | `check_tests` | Check if test files exist for a given source file | `filePath` |
-| `analyze_deps` | Analyze dependency changes for known issues | `filePath` |
+| `analyze_deps` | Analyze dependency changes for known vulnerabilities and deprecation | `filePath` |
+| `file_relationships` | Analyze import graph, detect coupling clusters, and blast radius | — |
+| `historical_context` | Fetch previous reviews for the repository to identify recurring patterns | — |
+| `symbol_search` | Find symbol definitions and usages across changed files (multi-language) | `symbol` |
+| `architectural_impact` | Score architectural impact by analyzing affected layers and cross-boundary coupling | — |
 
 The agent can call tools multiple times across turns. Each tool result is fed back into the conversation, allowing the agent to build a complete understanding before reviewing.
 
@@ -530,8 +658,16 @@ After gathering context (or reaching the maximum step count), the agent transiti
 - **Max Steps Clamp** — Agent loop iterations are clamped between 1 and 10
 - **Forced Structured Output** — If the agent doesn't produce valid JSON within the max steps, a force prompt is sent to extract structured output
 - **Fallback Parsing** — Multiple parsing strategies: code block extraction, full-response JSON parsing, and ultimate fallback to a generic "comment" review
-- **Diff Truncation** — Diffs exceeding 30,000 characters are truncated to prevent token overflow
+- **Retry with Backoff** — Chat completions automatically retry up to 2 times with exponential backoff for transient API failures
+- **ReDoS Protection** — `search_pattern` tool rejects regex patterns longer than 200 chars or with complexity score > 15
+- **Diff Truncation** — Diffs exceeding 50,000 characters are truncated to prevent token overflow
 - **File Size Limit** — `fetch_file` tool truncates files larger than 8,000 characters
+- **Hallucination Guards** — Review output is validated against the diff context to catch and remove hallucinated file references:
+  - File path validation: comments referencing files not present in the diff are filtered out
+  - Fuzzy matching: partial path matches are allowed (e.g., relative vs. absolute paths)
+  - Comment count cap: maximum 30 comments per review to prevent spam
+  - Summary fallback: ensures a summary is always present
+- **Review Mode Prompts** — Separate system prompts for `/fix` (fix suggestions), `/explain` (code explanation), and focused re-reviews
 
 ---
 
@@ -545,6 +681,31 @@ After gathering context (or reaching the maximum step count), the agent transiti
 | `info` | `notice` | Does not block | Suggestions, style notes |
 
 When `block_merge` is OFF (default), all check run conclusions are `neutral` or `success` regardless of severity.
+
+---
+
+## Evaluation & Benchmarks
+
+CodeSentinel includes an evaluation harness (`src/lib/__tests__/evaluation-benchmarks.test.ts`) that tests the AI review quality framework using curated bad PR diffs. The harness validates:
+
+- **Sample Integrity** — All benchmark samples have required fields (name, diff, expectedCategories)
+- **Uniqueness** — Sample names are unique to avoid double-counting
+- **Diff Validity** — Each diff contains at least one added line (prefix `+`)
+- **Category Coverage** — Security-related categories are present across the benchmark suite
+- **Output Schema** — Valid overall scores (`approve`, `request_changes`, `comment`) and severity levels (`info`, `warning`, `error`, `critical`)
+- **Hallucination Detection** — The guard logic is tested: comments with file paths not in the diff are rejected, line numbers exceeding diff range are flagged, and severity levels are validated against categories
+- **Approval Suspicion** — A meta-test ensures the benchmark is not trivially approving all bad PRs
+
+### Benchmark Categories
+
+| Category | Example |
+|---|---|
+| SQL Injection | String interpolation in SQL queries |
+| Hardcoded Secrets | API keys and passwords in source code |
+| Prototype Pollution | `Object.assign` with untrusted input |
+| Missing Error Handling | Unwrapped async/JSON.parse calls |
+| Race Condition | Check-then-act without synchronization |
+| Missing Input Validation | Direct `req.body` passthrough |
 
 ---
 
@@ -592,11 +753,14 @@ Both platforms support Dockerfile-based deployments. Push the repository and con
 ## Security Considerations
 
 - **Webhook Signature Verification** — All webhook endpoints verify signatures before processing (HMAC-SHA256 for GitHub, token comparison for GitLab)
-- **Timing-Safe Comparison** — GitHub signature verification uses `crypto.timingSafeEqual` to prevent timing attacks
+- **Timing-Safe Comparison** — GitHub signature verification and password hashing use `crypto.timingSafeEqual` to prevent timing attacks
 - **JWT RS256** — GitHub App authentication uses RSA-SHA256 signed JWTs with 10-minute expiration
+- **JWT HS256 Sessions** — Dashboard sessions use HMAC-SHA256 JWTs with timing-safe signature verification
 - **Config Value Masking** — Sensitive configuration values (tokens, keys) are masked in API responses
+- **DB-Backed Rate Limiting** — Rate limit counters are persisted in SQLite, working across serverless instances
 - **Non-Root Container** — Docker production image runs as the `nextjs` user (UID 1001)
 - **No Hardcoded Secrets** — All credentials are stored in the database and configured through the UI
+- **Hallucination Guards** — Review output is validated against the diff to prevent the AI from referencing non-existent files or line numbers
 
 ---
 
@@ -612,6 +776,9 @@ Both platforms support Dockerfile-based deployments. Push the repository and con
 | `bun run db:generate` | Generate Prisma client |
 | `bun run db:migrate` | Run Prisma migrations |
 | `bun run db:reset` | Reset database |
+| `npx vitest run` | Run all tests |
+| `npx vitest` | Run tests in watch mode |
+| `npx tsc --noEmit` | Type-check without emitting |
 
 ---
 
@@ -622,7 +789,7 @@ Both platforms support Dockerfile-based deployments. Push the repository and con
 1. Add a new provider case in `src/lib/reviewer.ts` → `chatCompletion()` function
 2. Update the `AIProviderConfig` interface with provider-specific fields
 3. Add configuration keys to the whitelist in `/api/config`
-4. Add UI fields in the Settings tab of `src/app/page.tsx`
+4. Add UI fields in the Settings tab
 
 ### Adding a New Platform
 
@@ -636,7 +803,14 @@ Both platforms support Dockerfile-based deployments. Push the repository and con
 
 1. Define the tool in the `AGENT_TOOLS` array in `reviewer.ts`
 2. Add the tool execution logic to the `executeTool()` switch statement
-3. The agent automatically discovers available tools from the system prompt
+3. Add pure function tests in `src/lib/__tests__/reviewer-tools.test.ts`
+4. The agent automatically discovers available tools from the system prompt
+
+### Adding Evaluation Benchmarks
+
+1. Add new bad PR samples to `BAD_PR_SAMPLES` in `src/lib/__tests__/evaluation-benchmarks.test.ts`
+2. Each sample needs `name`, `diff`, and `expectedCategories`
+3. Add validation tests for any new categories
 
 ---
 
@@ -650,3 +824,4 @@ MIT
 
 - Built with [Next.js](https://nextjs.org/), [Prisma](https://www.prisma.io/), [shadcn/ui](https://ui.shadcn.com/), and [Tailwind CSS](https://tailwindcss.com/)
 - AI capabilities powered by [z-ai-web-dev-sdk](https://www.npmjs.com/package/z-ai-web-dev-sdk) and [Oencode](https://oencode.com/)
+- Testing powered by [Vitest](https://vitest.dev/)
