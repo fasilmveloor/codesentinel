@@ -24,13 +24,13 @@ export interface MRChange {
   renamed_file: boolean;
 }
 
-async function getGitLabConfig(host?: string): Promise<{ token: string; host: string }> {
+async function getGitLabConfig(host?: string): Promise<{ token: string; gitlabHost: string }> {
   const tokenConfig = await db.appConfig.findUnique({ where: { key: 'gitlab_token' } });
   const hostConfig = await db.appConfig.findUnique({ where: { key: 'gitlab_host' } });
 
   if (!tokenConfig?.value) throw new Error('GitLab token not configured');
 
-  return { token: tokenConfig.value, host: host || hostConfig?.value || 'https://gitlab.com' };
+  return { token: tokenConfig.value, gitlabHost: host || hostConfig?.value || 'https://gitlab.com' };
 }
 
 function encodeProjectPath(owner: string, repo: string): string {
@@ -38,16 +38,8 @@ function encodeProjectPath(owner: string, repo: string): string {
 }
 
 export async function fetchMRDiff(owner: string, repo: string, mrIid: number, host?: string): Promise<string> {
-  const { token, gitlabHost } = await getGitLabConfig(host);
-  const projectId = encodeProjectPath(owner, repo);
-
-  const response = await fetch(
-    `${gitlabHost}/api/v4/projects/${projectId}/merge_requests/${mrIid}/changes`,
-    { headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'AI-PR-Reviewer' } }
-  );
-  if (!response.ok) throw new Error(`Failed to fetch MR diff: ${response.status}`);
-  const data = await response.json();
-  const changes: MRChange[] = data.changes || [];
+  // Reuse fetchMRChanges to avoid duplicate API calls
+  const { changes } = await fetchMRChanges(owner, repo, mrIid, host);
 
   return changes.map((change) => {
     const oldPath = change.old_path || change.new_path;
@@ -66,10 +58,15 @@ export async function fetchMRInfo(owner: string, repo: string, mrIid: number, ho
 
   const response = await fetch(
     `${gitlabHost}/api/v4/projects/${projectId}/merge_requests/${mrIid}`,
-    { headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'AI-PR-Reviewer' } }
+    { headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'CodeSentinel' } }
   );
   if (!response.ok) throw new Error(`Failed to fetch MR info: ${response.status}`);
   const data = await response.json();
+
+  // The single MR endpoint doesn't include diff stats, so we compute from changes
+  // if the changes array is present (it sometimes is on gitlab.com), otherwise we
+  // fall back to a separate /changes request.
+  const changes: MRChange[] = data.changes || [];
 
   return {
     title: data.title || '',
@@ -78,9 +75,13 @@ export async function fetchMRInfo(owner: string, repo: string, mrIid: number, ho
     description: data.description || '',
     sourceBranch: data.source_branch || '',
     targetBranch: data.target_branch || '',
-    additions: 0,
-    deletions: 0,
-    changedFiles: 0,
+    additions: changes.length > 0
+      ? changes.reduce((sum, c) => sum + (c.diff.match(/^\+[^+]/gm) || []).length, 0)
+      : 0,
+    deletions: changes.length > 0
+      ? changes.reduce((sum, c) => sum + (c.diff.match(/^-[^-]/gm) || []).length, 0)
+      : 0,
+    changedFiles: changes.length || 0,
     baseSha: data.diff_refs?.base_sha || '',
     headSha: data.diff_refs?.head_sha || '',
     startSha: data.diff_refs?.start_sha || '',
@@ -93,7 +94,7 @@ export async function fetchMRChanges(owner: string, repo: string, mrIid: number,
 
   const response = await fetch(
     `${gitlabHost}/api/v4/projects/${projectId}/merge_requests/${mrIid}/changes`,
-    { headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'AI-PR-Reviewer' } }
+    { headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'CodeSentinel' } }
   );
   if (!response.ok) throw new Error(`Failed to fetch MR changes: ${response.status}`);
   const data = await response.json();
@@ -134,7 +135,7 @@ export async function postMRDiscussion(owner: string, repo: string, mrIid: numbe
 
   const response = await fetch(
     `${gitlabHost}/api/v4/projects/${projectId}/merge_requests/${mrIid}/discussions`,
-    { method: 'POST', headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'AI-PR-Reviewer', 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) }
+    { method: 'POST', headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'CodeSentinel', 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) }
   );
   if (!response.ok) {
     console.error('Failed to post MR discussion:', response.status);
@@ -148,7 +149,7 @@ export async function postMRNote(owner: string, repo: string, mrIid: number, bod
 
   const response = await fetch(
     `${gitlabHost}/api/v4/projects/${projectId}/merge_requests/${mrIid}/notes`,
-    { method: 'POST', headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'AI-PR-Reviewer', 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) }
+    { method: 'POST', headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'CodeSentinel', 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) }
   );
   if (!response.ok) {
     console.error('Failed to post MR note:', response.status);

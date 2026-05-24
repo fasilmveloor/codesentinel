@@ -21,6 +21,10 @@ export const MASK_MIN_LENGTH = 8;
 // Rate limiting
 export const RATE_LIMIT_WINDOW = 60000; // 1 minute
 export const RATE_LIMIT_MAX = 30; // max requests per window
+export const LOGIN_RATE_LIMIT_MAX = 5; // Max login attempts per minute
+
+// Review timeout
+export const REVIEW_TIMEOUT_MS = 120000; // 2 minutes
 
 // Pagination defaults
 export const DEFAULT_PAGE = 1;

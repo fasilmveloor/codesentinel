@@ -1,110 +1,211 @@
 import { db } from './db';
 import { RATE_LIMIT_WINDOW, RATE_LIMIT_MAX } from './constants';
 
-// DB-backed rate limiter — serverless-friendly (survives cold starts)
-// Uses the AppConfig table to track rate limit counters per IP.
-// On each check, expired entries are lazily cleaned up.
+/**
+ * DB-backed rate limiter.
+ * Uses the AppConfig table to store rate limit counters per IP.
+ * Works across serverless instances and survives server restarts.
+ */
 
-const RATE_LIMIT_KEY_PREFIX = 'ratelimit:';
+// Lazy cleanup: clean up on every Nth rate limit check to avoid unbounded growth
+// without requiring a separate cron job (serverless-compatible)
+const CLEANUP_EVERY_N_REQUESTS = 50;
+let requestCounter = 0;
 
-interface RateLimitRecord {
-  count: number;
-  resetTime: number;
+// --- Cleanup Metrics ---
+
+export interface CleanupMetrics {
+  lastCleanupAt: string | null;
+  lastCleanupCount: number;
+  totalCleanups: number;
+  totalEntriesCleaned: number;
 }
 
-function parseRecord(value: string): RateLimitRecord | null {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
+// In-memory metrics (reset on cold start, which is acceptable for monitoring)
+let cleanupMetrics: CleanupMetrics = {
+  lastCleanupAt: null,
+  lastCleanupCount: 0,
+  totalCleanups: 0,
+  totalEntriesCleaned: 0,
+};
 
 /**
- * Check rate limit for a given IP address using the database.
- * Returns true if the request is allowed, false if rate limited.
- * Also performs lazy cleanup of expired entries.
+ * Get cleanup metrics for monitoring dashboards.
  */
+export function getCleanupMetrics(): CleanupMetrics {
+  return { ...cleanupMetrics };
+}
+
+// --- Per-IP rate limit tracking (uses DB for serverless compatibility) ---
+
 export async function checkRateLimit(ip: string): Promise<boolean> {
-  const key = `${RATE_LIMIT_KEY_PREFIX}${ip}`;
+  const key = `rate_limit:${ip}`;
   const now = Date.now();
 
-  // Lazy cleanup: delete expired entries (max 5 per check to avoid slowness)
   try {
-    const allRateLimitConfigs = await db.appConfig.findMany({
-      where: { key: { startsWith: RATE_LIMIT_KEY_PREFIX } },
-      take: 50,
-    });
+    const record = await db.appConfig.findUnique({ where: { key } });
 
-    let deleted = 0;
-    for (const config of allRateLimitConfigs) {
-      const record = parseRecord(config.value);
-      if (record && now > record.resetTime) {
-        await db.appConfig.delete({ where: { key: config.key } });
-        deleted++;
-        if (deleted >= 5) break; // Limit cleanup per request
-      }
-    }
-  } catch {
-    // Cleanup failure shouldn't block the request
-  }
-
-  // Check current rate limit
-  try {
-    const existing = await db.appConfig.findUnique({ where: { key } });
-    const record = existing ? parseRecord(existing.value) : null;
-
-    if (!record || now > record.resetTime) {
-      // Window expired or no record — start fresh
+    if (!record || now > parseInt(record.value.split(':')[1], 10)) {
+      // New window or expired window
       await db.appConfig.upsert({
         where: { key },
-        update: { value: JSON.stringify({ count: 1, resetTime: now + RATE_LIMIT_WINDOW }) },
-        create: { key, value: JSON.stringify({ count: 1, resetTime: now + RATE_LIMIT_WINDOW }) },
+        update: { value: `1:${now + RATE_LIMIT_WINDOW}` },
+        create: { key, value: `1:${now + RATE_LIMIT_WINDOW}` },
       });
+
+      // Lazy cleanup: periodically clean expired entries
+      requestCounter++;
+      if (requestCounter >= CLEANUP_EVERY_N_REQUESTS) {
+        requestCounter = 0;
+        // Fire-and-forget cleanup (non-blocking)
+        cleanupRateLimitEntries().catch(() => {});
+      }
+
       return true;
     }
 
-    if (record.count >= RATE_LIMIT_MAX) {
-      return false; // Rate limited
+    const [countStr, resetTimeStr] = record.value.split(':');
+    const count = parseInt(countStr, 10);
+
+    if (count >= RATE_LIMIT_MAX) {
+      return false;
     }
 
-    // Increment counter
     await db.appConfig.update({
       where: { key },
-      data: { value: JSON.stringify({ count: record.count + 1, resetTime: record.resetTime }) },
+      data: { value: `${count + 1}:${resetTimeStr}` },
     });
 
     return true;
   } catch {
-    // If DB operation fails, allow the request (fail open)
-    console.error('Rate limit DB operation failed, allowing request');
+    // If DB fails, allow the request through (fail open)
     return true;
   }
 }
 
 /**
- * Manual cleanup of all expired rate limit entries.
- * Can be called from a scheduled function or admin endpoint.
+ * Clean up expired rate limit entries from the database.
+ * Uses Prisma instead of raw SQL for database-portability.
+ * Should be called periodically to prevent unbounded growth.
+ *
+ * Strategy:
+ * 1. Scan for keys matching the rate_limit: prefix
+ * 2. Parse each entry's expiry timestamp
+ * 3. Delete expired entries in a batch
+ *
+ * This is called lazily by checkRateLimit() and can also be
+ * triggered via the /api/cleanup API endpoint or an external cron.
+ *
+ * Cleanup can also be scheduled via:
+ * - The /api/cleanup/scheduled endpoint (supports CRON_SECRET for auth)
+ * - An external cron service (cron-job.org, GitHub Actions, etc.)
+ * - Netlify scheduled functions
  */
 export async function cleanupRateLimitEntries(): Promise<number> {
   const now = Date.now();
-  let deleted = 0;
+  let cleaned = 0;
 
   try {
-    const allRateLimitConfigs = await db.appConfig.findMany({
-      where: { key: { startsWith: RATE_LIMIT_KEY_PREFIX } },
+    // Use Prisma's findMany with startsWith filter — more portable than raw SQL
+    // We scan all rate_limit keys and delete expired ones
+    const allEntries = await db.appConfig.findMany({
+      where: {
+        key: { startsWith: 'rate_limit:' },
+      },
+      select: { key: true, value: true },
     });
 
-    for (const config of allRateLimitConfigs) {
-      const record = parseRecord(config.value);
-      if (record && now > record.resetTime) {
-        await db.appConfig.delete({ where: { key: config.key } });
-        deleted++;
+    const expiredKeys: string[] = [];
+    for (const entry of allEntries) {
+      const parts = entry.value.split(':');
+      if (parts.length < 2) {
+        // Malformed entry — clean it up
+        expiredKeys.push(entry.key);
+        continue;
+      }
+      const resetTime = parseInt(parts[1], 10);
+      if (isNaN(resetTime) || now > resetTime) {
+        expiredKeys.push(entry.key);
+      }
+    }
+
+    // Batch delete expired entries
+    if (expiredKeys.length > 0) {
+      await db.appConfig.deleteMany({
+        where: {
+          key: { in: expiredKeys },
+        },
+      });
+      cleaned = expiredKeys.length;
+    }
+
+    // Update cleanup metrics
+    if (cleaned > 0) {
+      cleanupMetrics = {
+        lastCleanupAt: new Date().toISOString(),
+        lastCleanupCount: cleaned,
+        totalCleanups: cleanupMetrics.totalCleanups + 1,
+        totalEntriesCleaned: cleanupMetrics.totalEntriesCleaned + cleaned,
+      };
+
+      // Persist cleanup timestamp to DB for cross-instance visibility
+      try {
+        await db.appConfig.upsert({
+          where: { key: 'rate_limit_last_cleanup' },
+          update: { value: new Date().toISOString() },
+          create: { key: 'rate_limit_last_cleanup', value: new Date().toISOString() },
+        });
+      } catch {
+        // Non-critical — metrics are primarily in-memory
       }
     }
   } catch {
-    // Ignore cleanup errors
+    // Silent fail — cleanup is best-effort
   }
 
-  return deleted;
+  return cleaned;
+}
+
+/**
+ * Get statistics about rate limit entries for monitoring.
+ * Returns count of active and expired entries.
+ */
+export async function getRateLimitStats(): Promise<{ active: number; expired: number; total: number; lastCleanupAt: string | null }> {
+  const now = Date.now();
+  let active = 0;
+  let expired = 0;
+  let lastCleanupAt: string | null = cleanupMetrics.lastCleanupAt;
+
+  try {
+    const [allEntries, lastCleanupRecord] = await Promise.all([
+      db.appConfig.findMany({
+        where: { key: { startsWith: 'rate_limit:' } },
+        select: { value: true },
+      }),
+      db.appConfig.findUnique({ where: { key: 'rate_limit_last_cleanup' } }),
+    ]);
+
+    for (const entry of allEntries) {
+      const parts = entry.value.split(':');
+      if (parts.length < 2) {
+        expired++;
+        continue;
+      }
+      const resetTime = parseInt(parts[1], 10);
+      if (isNaN(resetTime) || now > resetTime) {
+        expired++;
+      } else {
+        active++;
+      }
+    }
+
+    // Use DB-persisted timestamp if available (more reliable across instances)
+    if (lastCleanupRecord?.value) {
+      lastCleanupAt = lastCleanupRecord.value;
+    }
+  } catch {
+    // Return what we have on failure
+  }
+
+  return { active, expired, total: active + expired, lastCleanupAt };
 }

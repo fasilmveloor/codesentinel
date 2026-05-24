@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { db } from './db';
 import { GITHUB_API_TIMEOUT, GITHUB_FILE_CONTENT_TRUNCATE, REPO_NAME_REGEX } from './constants';
+import { logger } from './logger';
 
 function fetchWithTimeout(url: string, options: RequestInit, timeout = GITHUB_API_TIMEOUT): Promise<Response> {
   const controller = new AbortController();
@@ -237,7 +238,8 @@ export async function postPRReview(
   );
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('Failed to post PR review:', errorText);
+    const log = logger.child({ component: 'github', owner, repo, pr: prNumber });
+    log.error('Failed to post PR review', { status: response.status, error: errorText });
     throw new Error(`Failed to post PR review: ${response.status}`);
   }
 }
@@ -267,8 +269,9 @@ export async function postPRComment(
       body: JSON.stringify({ body }),
     }
   );
+  const log = logger.child({ component: 'github', owner, repo, pr: prNumber });
   if (!response.ok) {
-    console.error('Failed to post PR comment:', response.status);
+    log.error('Failed to post PR comment', { status: response.status });
     throw new Error(`Failed to post PR comment: ${response.status}`);
   }
 }
@@ -300,8 +303,8 @@ export async function replyToReviewComment(
     }
   );
   if (!response.ok) {
-    const errorMsg = `Failed to reply to review comment: ${response.status}`;
-    console.error(errorMsg);
+    const log = logger.child({ component: 'github', owner, repo, pr: prNumber });
+    log.warn('Failed to reply to review comment, falling back to PR comment', { status: response.status });
     // Fall back to posting a general PR comment
     await postPRComment(owner, repo, prNumber, body, installationId);
   }
@@ -360,9 +363,10 @@ export async function createCheckRun(
       body: JSON.stringify(reqBody),
     }
   );
+  const log = logger.child({ component: 'github', owner, repo });
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('Failed to create check run:', errorText);
+    log.error('Failed to create check run', { status: response.status, error: errorText });
     throw new Error(`Failed to create check run: ${response.status}`);
   }
   const data = await response.json();
@@ -416,8 +420,9 @@ export async function updateCheckRun(
       body: JSON.stringify(reqBody),
     }
   );
+  const log = logger.child({ component: 'github', owner, repo });
   if (!response.ok) {
-    console.error('Failed to update check run:', response.status);
+    log.error('Failed to update check run', { status: response.status });
     throw new Error(`Failed to update check run: ${response.status}`);
   }
 }

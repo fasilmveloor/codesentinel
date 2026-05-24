@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from './db';
+import { logger } from './logger';
 
 // --- Constants ---
 
@@ -7,71 +8,85 @@ const SESSION_COOKIE_NAME = 'cs-session';
 const SESSION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const PASSWORD_SALT_LENGTH = 32;
 const PASSWORD_KEY_LENGTH = 64;
+const JWT_ALGORITHM = 'HS256';
 
-// JWT-based session management (stateless, serverless-friendly)
-// Replaces the previous in-memory Map approach which doesn't work on
-// serverless platforms like Netlify (cold starts wipe memory).
+// --- JWT Secret (DB-backed, auto-generated) ---
 
-const JWT_HEADER = { alg: 'HS256', typ: 'JWT' };
+let _jwtSecret: string | null = null;
 
-function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('JWT_SECRET environment variable is required for Netlify deployment');
+async function getJWTSecret(): Promise<string> {
+  if (_jwtSecret) return _jwtSecret;
+  try {
+    const config = await db.appConfig.findUnique({ where: { key: 'jwt_secret' } });
+    if (config?.value) {
+      _jwtSecret = config.value;
+      return _jwtSecret;
+    }
+  } catch {
+    // DB might not be ready yet
   }
-  if (secret.length < 32) {
-    throw new Error('JWT_SECRET must be at least 32 characters long');
+  // Generate a new secret and persist it
+  const secret = crypto.randomBytes(64).toString('hex');
+  try {
+    await db.appConfig.upsert({
+      where: { key: 'jwt_secret' },
+      update: { value: secret },
+      create: { key: 'jwt_secret', value: secret },
+    });
+  } catch {
+    // If we can't persist, use in-memory only (will be regenerated on restart)
   }
+  _jwtSecret = secret;
   return secret;
 }
 
-function base64UrlEncode(data: string | Buffer): string {
-  const str = Buffer.isBuffer(data) ? data.toString('base64') : Buffer.from(data).toString('base64');
-  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+// --- JWT Helpers ---
+
+function base64UrlEncode(data: string): string {
+  return Buffer.from(data).toString('base64url');
 }
 
 function base64UrlDecode(str: string): string {
-  let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  while (base64.length % 4) base64 += '=';
-  return Buffer.from(base64, 'base64').toString('utf8');
+  const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(base64, 'base64').toString('utf-8');
 }
 
-interface JWTPayload {
-  iat: number;       // issued at (epoch ms)
-  exp: number;       // expires at (epoch ms)
-  sub: string;       // subject ("admin")
-  jti: string;       // unique token ID
+function base64UrlDecodeBuffer(str: string): Buffer {
+  const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(base64, 'base64');
 }
 
-function signJWT(payload: JWTPayload): string {
-  const secret = getJwtSecret();
-  const headerB64 = base64UrlEncode(JSON.stringify(JWT_HEADER));
-  const payloadB64 = base64UrlEncode(JSON.stringify(payload));
-  const signingInput = `${headerB64}.${payloadB64}`;
-  const signature = crypto.createHmac('sha256', secret).update(signingInput).digest();
-  const signatureB64 = base64UrlEncode(signature);
-  return `${signingInput}.${signatureB64}`;
+async function createJWT(payload: Record<string, unknown>): Promise<string> {
+  const secret = await getJWTSecret();
+  const header = base64UrlEncode(JSON.stringify({ alg: JWT_ALGORITHM, typ: 'JWT' }));
+  const body = base64UrlEncode(JSON.stringify(payload));
+  const signInput = `${header}.${body}`;
+  const signature = crypto.createHmac('sha256', secret).update(signInput).digest('base64url');
+  return `${signInput}.${signature}`;
 }
 
-function verifyJWT(token: string): JWTPayload | null {
+async function verifyJWT(token: string): Promise<Record<string, unknown> | null> {
   try {
-    const secret = getJwtSecret();
     const parts = token.split('.');
     if (parts.length !== 3) return null;
 
-    const [headerB64, payloadB64, signatureB64] = parts;
-    const signingInput = `${headerB64}.${payloadB64}`;
-    const expectedSignature = crypto.createHmac('sha256', secret).update(signingInput).digest();
-    const actualSignature = Buffer.from(base64UrlDecode(signatureB64), 'binary');
+    const [headerPart, bodyPart, signaturePart] = parts;
+    const secret = await getJWTSecret();
 
-    // Timing-safe comparison
-    if (actualSignature.length !== expectedSignature.length) return null;
-    if (!crypto.timingSafeEqual(actualSignature, expectedSignature)) return null;
+    // Verify signature with timing-safe comparison
+    const signInput = `${headerPart}.${bodyPart}`;
+    const expectedSignature = crypto.createHmac('sha256', secret).update(signInput).digest('base64url');
 
-    const payload: JWTPayload = JSON.parse(base64UrlDecode(payloadB64));
+    const signatureBuffer = base64UrlDecodeBuffer(signaturePart);
+    const expectedBuffer = Buffer.from(expectedSignature, 'base64url');
+
+    if (signatureBuffer.length !== expectedBuffer.length) return null;
+    if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return null;
+
+    const payload = JSON.parse(base64UrlDecode(bodyPart));
 
     // Check expiration
-    if (Date.now() > payload.exp) return null;
+    if (payload.exp && Date.now() / 1000 > (payload.exp as number)) return null;
 
     return payload;
   } catch {
@@ -126,35 +141,33 @@ export async function verifyPassword(password: string, storedHash: string): Prom
 // --- Session Management (JWT-based, stateless) ---
 
 /**
- * Create a new JWT session. Returns the signed token.
+ * Create a new session. Returns a JWT token.
+ * Stateless — no server-side storage needed.
  */
-export function createSession(): string {
-  const now = Date.now();
-  const payload: JWTPayload = {
-    iat: now,
-    exp: now + SESSION_EXPIRY_MS,
+export async function createSession(): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return createJWT({
     sub: 'admin',
-    jti: crypto.randomBytes(16).toString('hex'),
-  };
-  return signJWT(payload);
+    iat: now,
+    exp: now + Math.floor(SESSION_EXPIRY_MS / 1000),
+  });
 }
 
 /**
- * Validate a JWT session token. Returns true if valid and not expired.
+ * Validate a session JWT token. Returns true if valid and not expired.
  */
-export function validateSession(token: string): boolean {
-  return verifyJWT(token) !== null;
+export async function validateSession(token: string): Promise<boolean> {
+  const payload = await verifyJWT(token);
+  if (!payload) return false;
+  return payload.sub === 'admin';
 }
 
 /**
- * Destroy a session (logout).
- * With JWT, true server-side invalidation requires a blocklist. For this
- * single-admin app, we just clear the cookie client-side. For multi-user
- * scenarios, add a DB-backed token blocklist.
+ * Destroy a session (no-op for JWT — client clears cookie).
  */
 export function destroySession(_token: string): void {
-  // Stateless JWT: no server-side action needed
-  // Cookie is cleared client-side via clearSessionCookie()
+  // JWT is stateless — destroying is just the client deleting the cookie
+  // This function exists for API compatibility
 }
 
 // --- Cookie Helpers ---
@@ -185,8 +198,8 @@ export function createSessionCookie(token: string): string {
     'HttpOnly',
     'SameSite=Strict',
     `Max-Age=${Math.floor(SESSION_EXPIRY_MS / 1000)}`,
-    // Secure flag added only in production (HTTPS)
-    process.env.NODE_ENV === 'production' ? 'Secure' : '',
+    // Secure flag opt-in via env var (not auto-based on NODE_ENV)
+    process.env.COOKIE_SECURE === 'true' ? 'Secure' : '',
   ]
     .filter(Boolean)
     .join('; ');
@@ -213,11 +226,11 @@ export { SESSION_COOKIE_NAME, SESSION_EXPIRY_MS };
 /**
  * Check if a request is authenticated. Returns null if authenticated,
  * or a NextResponse with 401 if not.
- * Usage: const authError = requireAuth(request); if (authError) return authError;
+ * Usage: const authError = await requireAuth(request); if (authError) return authError;
  */
-export function requireAuth(request: Request): Response | null {
+export async function requireAuth(request: Request): Promise<Response | null> {
   const token = getSessionToken(request);
-  if (!token || !validateSession(token)) {
+  if (!token || !(await validateSession(token))) {
     return new Response(JSON.stringify({ error: 'Authentication required' }), {
       status: 401,
       headers: { 'Content-Type': 'application/json' },
