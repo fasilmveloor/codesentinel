@@ -12,9 +12,9 @@ import type { NextRequest } from 'next/server';
  *
  * Note: This middleware only checks for cookie EXISTENCE as a UX optimization
  * (redirect unauthenticated users to login). The actual security enforcement
- * happens in API route handlers via requireAuth(), which validates the JWT
- * session token cryptographically. This two-layer approach works because all
- * sensitive data flows through API routes, not page components.
+ * happens in API route handlers via requireAuth(), which validates the session
+ * token against the in-memory session store. This two-layer approach works
+ * because all sensitive data flows through API routes, not page components.
  */
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

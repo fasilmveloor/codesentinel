@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI PR Reviewer — Automated Code Review",
-  description: "AI-powered GitHub Pull Request review tool. Automatically reviews code for bugs, security vulnerabilities, performance issues, and best practices.",
+  title: "CodeSentinel — AI PR Reviewer",
+  description: "Self-hosted AI-powered code review agent for GitHub and GitLab. Automatically reviews code for bugs, security vulnerabilities, performance issues, and best practices.",
   keywords: ["AI", "PR Review", "GitHub", "Code Review", "Automated", "LLM"],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
