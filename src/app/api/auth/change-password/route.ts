@@ -9,7 +9,7 @@ import {
 
 export async function POST(request: NextRequest) {
   // Auth check — must be logged in to change password
-  const authError = requireAuth(request);
+  const authError = await requireAuth(request);
   if (authError) return authError;
 
   try {
@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
     const newHash = await hashPassword(newPassword);
     await setAdminPasswordHash(newHash);
 
-    console.log('Admin password changed');
+    console.warn('Admin password changed');
 
     return NextResponse.json({ success: true, message: 'Password changed successfully' });
   } catch (error) {

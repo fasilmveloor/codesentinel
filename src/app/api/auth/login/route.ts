@@ -6,9 +6,19 @@ import {
   getAdminPasswordHash,
   isSetupComplete,
 } from '@/lib/auth';
+import { checkRateLimit } from '@/lib/rate-limit';
 
 export async function POST(request: NextRequest) {
   try {
+    // Rate limit login attempts to prevent brute force (stricter than webhook limit)
+    const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
+    if (!(await checkRateLimit(`login:${clientIp}`))) {
+      return NextResponse.json(
+        { error: 'Too many login attempts. Please try again later.' },
+        { status: 429 }
+      );
+    }
+
     // Check if setup is complete
     const setupDone = await isSetupComplete();
     if (!setupDone) {
@@ -25,9 +35,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Password is required' }, { status: 400 });
     }
 
-    // Get client IP for logging
-    const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-
     // Verify password
     const storedHash = await getAdminPasswordHash();
     if (!storedHash) {
@@ -41,10 +48,10 @@ export async function POST(request: NextRequest) {
     }
 
     // Create session
-    const token = createSession();
+    const token = await createSession();
     const cookie = createSessionCookie(token);
 
-    console.log(`Successful login from IP: ${clientIp}`);
+    console.info('Successful login');
 
     return NextResponse.json(
       { success: true, message: 'Login successful' },

@@ -13,13 +13,15 @@ const SENSITIVE_KEYS = [
 ];
 
 function maskValue(value: string): string {
-  if (value.length <= MASK_MIN_LENGTH) return '--------';
-  return value.substring(0, 4) + '----' + value.substring(value.length - 4);
+  if (value.length <= MASK_MIN_LENGTH) return '••••••••';
+  // For short values (9-11 chars), show only first 2 and last 2 to avoid over-revealing
+  if (value.length <= 12) return value.substring(0, 2) + '••••' + value.substring(value.length - 2);
+  return value.substring(0, 4) + '••••' + value.substring(value.length - 4);
 }
 
 export async function GET(request: NextRequest) {
   // Auth check
-  const authError = requireAuth(request);
+  const authError = await requireAuth(request);
   if (authError) return authError;
 
   try {
@@ -64,7 +66,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   // Auth check
-  const authError = requireAuth(request);
+  const authError = await requireAuth(request);
   if (authError) return authError;
 
   try {
@@ -100,6 +102,7 @@ export async function POST(request: NextRequest) {
       'ai_temperature',
       'ai_max_steps',
       'block_merge',
+      'ignore_patterns',
     ];
 
     if (!allowedKeys.includes(key)) {

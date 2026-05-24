@@ -37,10 +37,10 @@ export async function POST(request: NextRequest) {
     await setAdminPasswordHash(hash);
 
     // Auto-login after setup
-    const token = createSession();
+    const token = await createSession();
     const cookie = createSessionCookie(token);
 
-    console.log('Admin account created');
+    console.warn('Admin account created');
 
     return NextResponse.json(
       { success: true, message: 'Admin account created successfully' },

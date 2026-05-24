@@ -4,7 +4,8 @@ import { db } from '@/lib/db';
 import { fetchPRDiff, fetchPRInfo, upsertRepository, postPRReview, postPRComment, replyToReviewComment, createCheckRun, updateCheckRun } from '@/lib/github';
 import { reviewPR } from '@/lib/reviewer';
 import { checkRateLimit } from '@/lib/rate-limit';
-import { REPO_NAME_REGEX, GITHUB_REVIEW_BODY_MAX, GITHUB_ANNOTATION_LIMIT } from '@/lib/constants';
+import { REPO_NAME_REGEX, GITHUB_REVIEW_BODY_MAX, GITHUB_ANNOTATION_LIMIT, REVIEW_TIMEOUT_MS } from '@/lib/constants';
+import { withTimeout } from '@/lib/review-timeout';
 
 function truncateForGitHub(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
@@ -41,7 +42,7 @@ async function shouldBlockMerge(): Promise<boolean> {
 }
 
 // Supported comment commands
-const COMMENT_COMMANDS = ['/review', '/recheck', '/check', '/re-review', '/review again'];
+const COMMENT_COMMANDS = ['/review', '/recheck', '/check', '/re-review', '/review again', '/help', '/fix', '/explain', '/ignore'];
 
 function parseCommentCommand(body: string): { isCommand: boolean; command: string; args: string } {
   const trimmed = body.trim().toLowerCase();
@@ -54,12 +55,7 @@ function parseCommentCommand(body: string): { isCommand: boolean; command: strin
   return { isCommand: false, command: '', args: '' };
 }
 
-// --- Review Processing (synchronous for serverless) ---
-// On serverless (Netlify), fire-and-forget async work is killed after the
-// response is sent. We process reviews synchronously within the function
-// invocation. For Netlify Pro, maxDuration can be set to 60s+ in netlify.toml.
-// If a timeout occurs, the review stays in "reviewing" status and will be
-// recovered by the stuck-review recovery mechanism.
+// --- Main Review Processing ---
 
 async function processReview(
   owner: string,
@@ -73,7 +69,8 @@ async function processReview(
   isReReview: boolean = false,
   focusFile?: string,
   focusQuestion?: string,
-  commentId?: number
+  commentId?: number,
+  reviewMode?: 'fix' | 'explain'
 ) {
   let reviewId: string | undefined;
   let checkRunId: number | undefined;
@@ -102,7 +99,7 @@ async function processReview(
       try {
         checkRunId = await createCheckRun(
           owner, repo, headSha, 'in_progress',
-          { output: { title: 'AI Code Review: In Progress', summary: `Reviewing PR #${prNumber}: ${prTitle}` } },
+          { output: { title: 'CodeSentinel Review: In Progress', summary: `Reviewing PR #${prNumber}: ${prTitle}` } },
           installationId
         );
         await db.review.update({ where: { id: reviewId }, data: { checkRunId } });
@@ -116,16 +113,23 @@ async function processReview(
       fetchPRInfo(owner, repo, prNumber, installationId),
     ]);
 
-    const result = await reviewPR(diff, prInfo, {
+    // Wrap AI review with timeout to prevent stuck "reviewing" status
+    const result = await withTimeout(
+      reviewPR(diff, prInfo, {
       platform: 'github',
       owner,
       repo,
       prNumber,
       installationId,
       diff,
+      repositoryId,
       focusFile,
       focusQuestion,
-    });
+      reviewMode,
+    }),
+      REVIEW_TIMEOUT_MS,
+      reviewId
+    );
 
     await db.review.update({
       where: { id: reviewId },
@@ -139,7 +143,7 @@ async function processReview(
       },
     });
 
-    if (result.comments.length > 0) {
+    if (result.comments.length > 0 && reviewId) {
       await db.reviewComment.createMany({
         data: result.comments.map((c) => ({
           reviewId: reviewId!,
@@ -166,15 +170,46 @@ async function processReview(
         .slice(0, GITHUB_ANNOTATION_LIMIT)
         .map((c) => ({
           path: c.filePath,
-          line: c.line!,
+          line: c.line as number,
           side: c.side || 'RIGHT',
           body: truncateForGitHub(`[**${c.severity?.toUpperCase() || 'INFO'}**] ${c.body}`, 5000),
         }));
 
+      // Build reasoning trace section
+      let reasoningTrace = '';
+      try {
+        const steps = result.agentSteps;
+        if (steps && steps.length > 0) {
+          const stepLabels: Record<string, string> = {
+            analyze: 'Analyzed',
+            tool_call: 'Investigated',
+            reflect: 'Reviewed',
+            review: 'Produced',
+            synthesis: 'Synthesized',
+            force_final: 'Finalized',
+            fallback: 'Fallback',
+          };
+          const traceLines = steps
+            .filter((s) => s.step !== 'synthesis') // Skip raw synthesis in comment
+            .map((s, i) => {
+              const label = stepLabels[s.step] || s.step;
+              const toolLabel = s.tool ? ` \`${s.tool}\`` : '';
+              const reasoningText = s.reasoning ? ` — ${s.reasoning}` : '';
+              const conclusionText = s.conclusion ? `\n   > ${s.conclusion}` : '';
+              return `${i + 1}. **${label}**${toolLabel} ${s.description}${reasoningText}${conclusionText}`;
+            })
+            .join('\n');
+
+          reasoningTrace = `\n\n<details>\n<summary>🔍 Investigation Trace</summary>\n\n${traceLines}\n\n_Tokens used: ~${result.tokensUsed} | Model: ${result.modelUsed} | Steps: ${steps.length}_\n</details>`;
+        }
+      } catch { /* Gracefully skip if trace fails */ }
+
+      const baseBody = isReReview
+        ? `**Re-review** ${focusQuestion ? `(@ ${focusQuestion})` : ''}\n\n${result.summary}`
+        : result.summary;
+
       const reviewBody = truncateForGitHub(
-        isReReview
-          ? `**Re-review** ${focusQuestion ? `(@ ${focusQuestion})` : ''}\n\n${result.summary}`
-          : result.summary,
+        baseBody + reasoningTrace,
         GITHUB_REVIEW_BODY_MAX - 5000 // Reserve space for comments
       );
 
@@ -195,7 +230,7 @@ async function processReview(
         try {
           await postPRComment(
             owner, repo, prNumber,
-            `**Re-review complete** ${result.overallScore === 'approve' ? 'Approved' : result.overallScore === 'request_changes' ? 'Changes requested' : 'Commented'}\n\n${result.summary}`,
+            `**Re-review complete** ${result.overallScore === 'approve' ? '✅' : result.overallScore === 'request_changes' ? '⚠️' : '💬'}\n\n${result.summary}`,
             installationId
           );
         } catch { /* */ }
@@ -206,9 +241,9 @@ async function processReview(
     if (checkRunId) {
       try {
         const titleMap: Record<string, string> = {
-          approve: 'AI Code Review: Approved',
-          request_changes: 'AI Code Review: Changes Requested',
-          comment: 'AI Code Review: Comment',
+          approve: 'CodeSentinel Review: Approved',
+          request_changes: 'CodeSentinel Review: Changes Requested',
+          comment: 'CodeSentinel Review: Comment',
         };
 
         // When block_merge is enabled, request_changes = failure; otherwise neutral (advisory only)
@@ -221,8 +256,8 @@ async function processReview(
           .slice(0, 50)
           .map((c) => ({
             path: c.filePath,
-            start_line: c.line!,
-            end_line: c.line!,
+            start_line: c.line as number,
+            end_line: c.line as number,
             annotation_level: severityToAnnotationLevel(c.severity),
             message: c.body,
           }));
@@ -232,7 +267,7 @@ async function processReview(
           {
             conclusion: conclusionMap[result.overallScore] || 'neutral',
             output: {
-              title: titleMap[result.overallScore] || 'AI Code Review: Comment',
+              title: titleMap[result.overallScore] || 'CodeSentinel Review: Comment',
               summary: result.summary + (blockMerge ? '' : '\n\n_Merge blocking is disabled — this check is advisory only._'),
               annotations: annotations.length > 0 ? annotations : undefined,
             },
@@ -255,7 +290,7 @@ async function processReview(
       try {
         await updateCheckRun(owner, repo, checkRunId, 'completed', {
           conclusion: 'neutral',
-          output: { title: 'AI Code Review: Error', summary: `Review failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
+          output: { title: 'CodeSentinel Review: Error', summary: `Review failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
         }, installationId);
       } catch { /* */ }
     }
@@ -265,23 +300,24 @@ async function processReview(
 // --- Webhook Handler ---
 
 export async function POST(request: NextRequest) {
-  // Rate limiting (now async, DB-backed)
+  // Rate limiting (MUST await — checkRateLimit is async and returns Promise<boolean>)
   const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-  const allowed = await checkRateLimit(clientIp);
-  if (!allowed) {
+  if (!(await checkRateLimit(clientIp))) {
     return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 });
   }
 
   try {
     const body = await request.text();
 
-    // Verify webhook signature
+    // Verify webhook signature (REQUIRED — no secret means no auth)
     const secretConfig = await db.appConfig.findUnique({ where: { key: 'webhook_secret' } });
-    if (secretConfig?.value) {
-      const signature = request.headers.get('x-hub-signature-256');
-      if (!signature || !verifySignature(body, signature, secretConfig.value)) {
-        return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
-      }
+    if (!secretConfig?.value) {
+      console.error('SECURITY: No webhook_secret configured — rejecting all webhook requests');
+      return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 401 });
+    }
+    const signature = request.headers.get('x-hub-signature-256');
+    if (!signature || !verifySignature(body, signature, secretConfig.value)) {
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
 
     const payload = JSON.parse(body);
@@ -343,10 +379,6 @@ export async function POST(request: NextRequest) {
 
         // Validate owner/repo to prevent path traversal
         if (owner && repo && pr && headSha && validateRepoParams(owner, repo)) {
-          // Process review synchronously (serverless-compatible)
-          // GitHub webhooks expect a quick response, but also need the review.
-          // We process in the background and respond immediately for PR events,
-          // since GitHub will retry if the response is slow.
           processReview(
             owner, repo, pr.number, pr.title, pr.user?.login || 'unknown', pr.html_url, headSha, installationId
           ).catch((err) => console.error('Review processing error:', { pr: pr.number, error: err }));
@@ -372,12 +404,52 @@ export async function POST(request: NextRequest) {
           const commentId = payload.comment?.id;
           const commenter = payload.comment?.user?.login;
 
+          // Handle /help command
+          const trimmed = commentBody.trim().toLowerCase();
+          if (trimmed.startsWith('/help')) {
+            const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/re-review\` | Full re-review |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\` or \`/review please verify error handling\``;
+            try {
+              await postPRComment(owner, repo, prNumber, helpText, installationId);
+            } catch { /* */ }
+            return NextResponse.json({ message: 'Help posted', pr: prNumber });
+          }
+
+          // Handle /ignore command
+          if (trimmed.startsWith('/ignore')) {
+            const ignoreArgs = commentBody.trim().substring(7).trim();
+            const patterns = ignoreArgs ? ignoreArgs.split(/\s+/).filter(Boolean) : [];
+            try {
+              const existingConfig = await db.appConfig.findUnique({ where: { key: 'ignore_patterns' } });
+              const existingPatterns = existingConfig?.value ? JSON.parse(existingConfig.value) : [];
+              const newPatterns = [...new Set([...existingPatterns, ...patterns])];
+              await db.appConfig.upsert({
+                where: { key: 'ignore_patterns' },
+                update: { value: JSON.stringify(newPatterns) },
+                create: { key: 'ignore_patterns', value: JSON.stringify(newPatterns) },
+              });
+              const confirmText = `**Ignore patterns updated** 🙈\n\nThe following file patterns will be excluded from reviews:\n${newPatterns.map(p => `- \`${p}\``).join('\n')}\n\n_To remove patterns, update the \`ignore_patterns\` config in the dashboard._`;
+              try {
+                await postPRComment(owner, repo, prNumber, confirmText, installationId);
+              } catch { /* */ }
+            } catch { /* */ }
+            return NextResponse.json({ message: 'Ignore patterns updated', pr: prNumber });
+          }
+
           if (owner && repo && prNumber && validateRepoParams(owner, repo)) {
+            // Determine review mode from command
+            let reviewMode: 'fix' | 'explain' | undefined;
+            if (trimmed.startsWith('/fix')) {
+              reviewMode = 'fix';
+            } else if (trimmed.startsWith('/explain')) {
+              reviewMode = 'explain';
+            }
+
             // Post acknowledgment
             try {
+              const modeLabel = reviewMode === 'fix' ? '🔧 Fix suggestions' : reviewMode === 'explain' ? '📖 Code explanation' : '🔄 Re-review';
               await postPRComment(
                 owner, repo, prNumber,
-                `Re-review triggered by @${commenter} using \`${isCommand ? commentBody.trim().split(' ')[0] : '/review'}\`${args ? ` — focusing on: ${args}` : ''}\n\nReviewing now...`,
+                `${modeLabel} triggered by @${commenter} using \`${isCommand ? commentBody.trim().split(' ')[0] : '/review'}\`${args ? ` — focusing on: ${args}` : ''}\n\nReviewing now...`,
                 installationId
               );
             } catch { /* */ }
@@ -407,12 +479,13 @@ export async function POST(request: NextRequest) {
                 true, // isReReview
                 focusFile,
                 focusQuestion,
-                commentId
+                commentId,
+                reviewMode
               ).catch(console.error);
             } catch {
               processReview(
                 owner, repo, prNumber, payload.issue?.title || '', commenter || 'unknown', payload.issue?.html_url || '', '', installationId,
-                true, focusFile, focusQuestion, commentId
+                true, focusFile, focusQuestion, commentId, reviewMode
               ).catch(console.error);
             }
 
@@ -439,6 +512,24 @@ export async function POST(request: NextRequest) {
           const commenter = payload.comment?.user?.login;
 
           if (owner && repo && prNumber && validateRepoParams(owner, repo)) {
+            // Determine review mode from command
+            const reviewCommentTrimmed = commentBody.trim().toLowerCase();
+            let reviewMode: 'fix' | 'explain' | undefined;
+            if (reviewCommentTrimmed.startsWith('/fix')) {
+              reviewMode = 'fix';
+            } else if (reviewCommentTrimmed.startsWith('/explain')) {
+              reviewMode = 'explain';
+            }
+
+            // Handle /help command
+            if (reviewCommentTrimmed.startsWith('/help')) {
+              const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/re-review\` | Full re-review |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\``;
+              try {
+                await postPRComment(owner, repo, prNumber, helpText, installationId);
+              } catch { /* */ }
+              return NextResponse.json({ message: 'Help posted', pr: prNumber });
+            }
+
             let headSha = '';
             try {
               const prInfo = await fetchPRInfo(owner, repo, prNumber, installationId);
@@ -450,7 +541,8 @@ export async function POST(request: NextRequest) {
               true,
               filePath, // Focus on the file the comment is on
               args || `Re-check this code at ${filePath}`,
-              commentId
+              commentId,
+              reviewMode
             ).catch(console.error);
 
             return NextResponse.json({ message: 'Re-review triggered by review comment command', pr: prNumber });
