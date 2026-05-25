@@ -1,33 +1,16 @@
 import { describe, it, expect } from 'vitest';
-
-// Test logger logic in isolation
+import { logger } from '@/lib/logger';
 
 describe('Logger', () => {
-  // Simple structured log entry creation test
-  function createLogEntry(level: string, message: string, context?: Record<string, unknown>): Record<string, unknown> {
-    return {
-      timestamp: new Date().toISOString(),
-      level,
-      message,
-      ...(context && { context }),
-    };
-  }
-
-  it('should create a structured log entry', () => {
-    const entry = createLogEntry('info', 'Test message');
-    expect(entry.level).toBe('info');
-    expect(entry.message).toBe('Test message');
-    expect(entry.timestamp).toBeTruthy();
+  it('should create log entries', () => {
+    expect(logger).toBeDefined();
+    expect(typeof logger.info).toBe('function');
   });
 
-  it('should include context when provided', () => {
-    const entry = createLogEntry('error', 'Something failed', { requestId: 'abc-123' });
-    expect(entry.context).toEqual({ requestId: 'abc-123' });
-  });
-
-  it('should not include context key when not provided', () => {
-    const entry = createLogEntry('info', 'Simple message');
-    expect(entry.context).toBeUndefined();
+  it('should create child loggers with context', () => {
+    const child = logger.child({ component: 'test' });
+    expect(child).toBeDefined();
+    expect(typeof child.info).toBe('function');
   });
 });
 

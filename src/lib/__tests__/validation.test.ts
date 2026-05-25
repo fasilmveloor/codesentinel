@@ -1,27 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { sanitizeString, validatePRNumber, isValidUrl } from '@/lib/validation';
 
 describe('Input Validation', () => {
-  function sanitizeString(input: string, maxLength: number = 10000): string {
-    return input
-      .replace(/\0/g, '') // Remove null bytes
-      .substring(0, maxLength)
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '') // Remove script tags
-      .trim();
-  }
-
-  function validatePRNumber(prNumber: unknown): { valid: boolean; value: number } {
-    const num = typeof prNumber === 'string' ? parseInt(prNumber, 10) : typeof prNumber === 'number' ? prNumber : NaN;
-    if (isNaN(num) || num < 1 || num > 1000000 || !Number.isInteger(num)) return { valid: false, value: 0 };
-    return { valid: true, value: num };
-  }
-
-  function isValidUrl(url: string): boolean {
-    try {
-      const parsed = new URL(url);
-      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-    } catch { return false; }
-  }
-
   describe('sanitizeString', () => {
     it('should remove null bytes', () => {
       expect(sanitizeString('hello\0world')).toBe('helloworld');

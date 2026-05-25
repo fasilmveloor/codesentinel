@@ -11,14 +11,12 @@ describe('Job Queue', () => {
     createdAt: number;
   }
 
-  // Simple in-memory queue for testing
   class SimpleQueue {
     private jobs: QueueJob[] = [];
 
     enqueue(type: string, priority: number = 5): string {
       const id = `job-${Math.random().toString(36).substring(2, 8)}`;
       this.jobs.push({ id, type, status: 'queued', priority, attempts: 0, maxAttempts: 3, createdAt: Date.now() });
-      // Sort by priority (lower = higher priority)
       this.jobs.sort((a, b) => a.priority - b.priority);
       return id;
     }
@@ -39,7 +37,7 @@ describe('Job Queue', () => {
       if (job) {
         job.attempts++;
         if (job.attempts >= job.maxAttempts) job.status = 'failed';
-        else job.status = 'queued'; // Re-queue for retry
+        else job.status = 'queued';
       }
     }
 
@@ -65,7 +63,7 @@ describe('Job Queue', () => {
   it('should respect priority ordering', () => {
     const queue = new SimpleQueue();
     queue.enqueue('github_review', 5);
-    queue.enqueue('github_review', 1); // Higher priority
+    queue.enqueue('github_review', 1);
     queue.enqueue('github_review', 3);
     const job = queue.dequeue();
     expect(job!.priority).toBe(1);
@@ -83,11 +81,11 @@ describe('Job Queue', () => {
     const queue = new SimpleQueue();
     const id = queue.enqueue('github_review');
     queue.dequeue();
-    queue.markFailed(id); // Attempt 1 → re-queued
+    queue.markFailed(id);
     queue.dequeue();
-    queue.markFailed(id); // Attempt 2 → re-queued
+    queue.markFailed(id);
     queue.dequeue();
-    queue.markFailed(id); // Attempt 3 → failed permanently
+    queue.markFailed(id);
     expect(queue.getStats().failed).toBe(1);
   });
 
