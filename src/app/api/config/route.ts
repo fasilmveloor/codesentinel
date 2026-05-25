@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { CONFIG_VALUE_MAX_LENGTH, MASK_MIN_LENGTH } from '@/lib/constants';
 import { requireAuth } from '@/lib/auth';
+import { logger } from '@/lib/logger';
 
 const SENSITIVE_KEYS = [
   'github_token',
@@ -59,7 +60,7 @@ export async function GET(request: NextRequest) {
       blockMerge,
     });
   } catch (error) {
-    console.error('Failed to fetch config:', error);
+    logger.error('Failed to fetch config', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -117,7 +118,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ message: 'Config updated successfully' });
   } catch (error) {
-    console.error('Failed to update config:', error);
+    logger.error('Failed to update config', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

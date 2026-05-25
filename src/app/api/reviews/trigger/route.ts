@@ -6,6 +6,7 @@ import { db } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { withTimeout } from '@/lib/review-timeout';
 import { REVIEW_TIMEOUT_MS } from '@/lib/constants';
+import { logger } from '@/lib/logger';
 
 export async function POST(request: NextRequest) {
   // Auth check
@@ -28,7 +29,7 @@ export async function POST(request: NextRequest) {
       return triggerGitHubReview(owner, repo, Number(prNumber));
     }
   } catch (error) {
-    console.error('Trigger review error:', error);
+    logger.error('Trigger review error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -98,10 +99,10 @@ async function triggerGitHubReview(owner: string, repo: string, prNumber: number
         }));
         await postPRReview(owner, repo, prNumber, result.summary, ghEvent, ghComments);
       } catch (postError) {
-        console.error('Failed to post review to GitHub:', postError);
+        logger.error('Failed to post review to GitHub', { error: postError });
       }
     } catch (error) {
-      console.error('Review processing failed:', error);
+      logger.error('Review processing failed', { error });
       await db.review.update({
         where: { id: review.id },
         data: { status: 'failed', summary: error instanceof Error ? error.message : 'Review processing failed' },
@@ -185,10 +186,10 @@ async function triggerGitLabReview(owner: string, repo: string, mrIid: number) {
           }
         }
       } catch (postError) {
-        console.error('Failed to post review to GitLab:', postError);
+        logger.error('Failed to post review to GitLab', { error: postError });
       }
     } catch (error) {
-      console.error('GitLab review processing failed:', error);
+      logger.error('GitLab review processing failed', { error });
       await db.review.update({
         where: { id: review.id },
         data: { status: 'failed', summary: error instanceof Error ? error.message : 'Review processing failed' },

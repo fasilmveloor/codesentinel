@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { cleanupRateLimitEntries, getRateLimitStats, getCleanupMetrics } from '@/lib/rate-limit';
+import { logger } from '@/lib/logger';
 
 /**
  * Timing-safe comparison for CRON_SECRET to prevent timing attacks.
@@ -81,7 +82,7 @@ export async function POST(request: NextRequest) {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('Scheduled cleanup error:', error);
+    logger.error('Scheduled cleanup error', { error });
     return NextResponse.json(
       { error: 'Cleanup failed', timestamp: new Date().toISOString() },
       { status: 500 }
@@ -108,7 +109,7 @@ export async function GET(request: NextRequest) {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('Cleanup stats error:', error);
+    logger.error('Cleanup stats error', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

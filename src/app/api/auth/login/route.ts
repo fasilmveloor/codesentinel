@@ -7,12 +7,14 @@ import {
   isSetupComplete,
 } from '@/lib/auth';
 import { checkRateLimit } from '@/lib/rate-limit';
+import { LOGIN_RATE_LIMIT_MAX } from '@/lib/constants';
+import { logger } from '@/lib/logger';
 
 export async function POST(request: NextRequest) {
   try {
     // Rate limit login attempts to prevent brute force (stricter than webhook limit)
     const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
-    if (!(await checkRateLimit(`login:${clientIp}`))) {
+    if (!(await checkRateLimit(`login:${clientIp}`, LOGIN_RATE_LIMIT_MAX))) {
       return NextResponse.json(
         { error: 'Too many login attempts. Please try again later.' },
         { status: 429 }
@@ -43,7 +45,7 @@ export async function POST(request: NextRequest) {
 
     const isValid = await verifyPassword(password, storedHash);
     if (!isValid) {
-      console.warn(`Failed login attempt from IP: ${clientIp}`);
+      logger.warn('Failed login attempt', { clientIp });
       return NextResponse.json({ error: 'Invalid password' }, { status: 401 });
     }
 
@@ -51,7 +53,7 @@ export async function POST(request: NextRequest) {
     const token = await createSession();
     const cookie = createSessionCookie(token);
 
-    console.info('Successful login');
+    logger.info('Successful login');
 
     return NextResponse.json(
       { success: true, message: 'Login successful' },
@@ -61,7 +63,7 @@ export async function POST(request: NextRequest) {
       }
     );
   } catch (error) {
-    console.error('Login error:', error);
+    logger.error('Login error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

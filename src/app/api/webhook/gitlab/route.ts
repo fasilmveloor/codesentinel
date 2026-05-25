@@ -6,6 +6,7 @@ import { reviewPR } from '@/lib/reviewer';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { withTimeout } from '@/lib/review-timeout';
 import { REVIEW_TIMEOUT_MS } from '@/lib/constants';
+import { logger } from '@/lib/logger';
 
 function timingSafeTokenCompare(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -157,10 +158,10 @@ async function processGitLabReview(
         }
       }
     } catch (postError) {
-      console.error('Failed to post review to GitLab:', postError);
+      logger.error('Failed to post review to GitLab', { error: postError });
     }
   } catch (error) {
-    console.error('GitLab review processing failed:', error);
+    logger.error('GitLab review processing failed', { error });
     if (reviewId) {
       await db.review.update({
         where: { id: reviewId! },
@@ -180,7 +181,7 @@ export async function POST(request: NextRequest) {
   try {
     const secretConfig = await db.appConfig.findUnique({ where: { key: 'gitlab_webhook_secret' } });
     if (!secretConfig?.value) {
-      console.error('SECURITY: No gitlab_webhook_secret configured — rejecting all GitLab webhook requests');
+      logger.error('SECURITY: No gitlab_webhook_secret configured — rejecting all GitLab webhook requests');
       return NextResponse.json({ error: 'GitLab webhook secret not configured' }, { status: 401 });
     }
     const token = request.headers.get('x-gitlab-token');
@@ -204,7 +205,7 @@ export async function POST(request: NextRequest) {
         const host = project?.web_url ? new URL(project.web_url).origin : undefined;
 
         if (owner && repo && mr.iid) {
-          processGitLabReview(owner, repo, mr.iid, mr.title, payload.user?.username || 'unknown', mr.url, host).catch(console.error);
+          processGitLabReview(owner, repo, mr.iid, mr.title, payload.user?.username || 'unknown', mr.url, host).catch(err => logger.error('Async error', { error: err }));
           return NextResponse.json({ message: 'Review processing started', mr: mr.iid });
         }
       }
@@ -214,7 +215,7 @@ export async function POST(request: NextRequest) {
       const noteableType = payload.object_attributes?.noteable_type;
       if (noteableType === 'MergeRequest') {
         const noteBody = payload.object_attributes?.note || '';
-        const commands = ['/review', '/recheck', '/check', '/re-review', '/help', '/fix', '/explain', '/ignore'];
+        const commands = ['/review', '/recheck', '/check', '/re-review', '/help', '/fix', '/explain', '/ignore', '/config'];
         const isCommand = commands.some(cmd => noteBody.trim().toLowerCase().startsWith(cmd));
 
         if (isCommand) {
@@ -229,11 +230,49 @@ export async function POST(request: NextRequest) {
 
           // Handle /help command
           if (noteBody.trim().toLowerCase().startsWith('/help')) {
-            const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\``;
+            const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/config\` | View or update configuration |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\``;
             try {
               await postMRNote(owner, repo, mrIid, helpText, host);
             } catch { /* */ }
             return NextResponse.json({ message: 'Help posted', mr: mrIid });
+          }
+
+          // Handle /config command
+          if (noteBody.trim().toLowerCase().startsWith('/config')) {
+            const configArgs = noteBody.trim().substring(7).trim();
+            try {
+              const configEntries = await db.appConfig.findMany();
+              if (configArgs) {
+                const eqIdx = configArgs.indexOf('=');
+                if (eqIdx > 0) {
+                  const key = configArgs.substring(0, eqIdx).trim();
+                  const value = configArgs.substring(eqIdx + 1).trim();
+                  await db.appConfig.upsert({
+                    where: { key },
+                    update: { value },
+                    create: { key, value },
+                  });
+                  await postMRNote(owner, repo, mrIid, `**Config updated** ✅\n\n\`${key}\` = \`${value}\``, host);
+                } else {
+                  const entry = configEntries.find(e => e.key === configArgs);
+                  if (entry) {
+                    const masked = entry.key.includes('token') || entry.key.includes('secret') || entry.key.includes('key')
+                      ? entry.value.substring(0, 4) + '…' : entry.value;
+                    await postMRNote(owner, repo, mrIid, `**Config**: \`${entry.key}\` = \`${masked}\``, host);
+                  } else {
+                    await postMRNote(owner, repo, mrIid, `**Config**: Key \`${configArgs}\` not found.`, host);
+                  }
+                }
+              } else {
+                const lines = configEntries.map(e => {
+                  const masked = e.key.includes('token') || e.key.includes('secret') || e.key.includes('key')
+                    ? e.value.substring(0, 4) + '…' : e.value;
+                  return `- \`${e.key}\`: \`${masked}\``;
+                });
+                await postMRNote(owner, repo, mrIid, `**Current Configuration**\n\n${lines.join('\n')}\n\n_To update: \`/config key=value\`_`, host);
+              }
+            } catch { /* */ }
+            return NextResponse.json({ message: 'Config handled', mr: mrIid });
           }
 
           // Handle /ignore command
@@ -266,7 +305,7 @@ export async function POST(request: NextRequest) {
           }
 
           if (owner && repo && mrIid) {
-            processGitLabReview(owner, repo, mrIid, mr?.title || '', payload.user?.username || 'unknown', mr?.url || '', host, reviewMode).catch(console.error);
+            processGitLabReview(owner, repo, mrIid, mr?.title || '', payload.user?.username || 'unknown', mr?.url || '', host, reviewMode).catch(err => logger.error('Async error', { error: err }));
             return NextResponse.json({ message: 'Re-review triggered by note', mr: mrIid });
           }
         }
@@ -275,7 +314,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ message: 'Event ignored' });
   } catch (error) {
-    console.error('GitLab webhook error:', error);
+    logger.error('GitLab webhook error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

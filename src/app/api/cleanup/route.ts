@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cleanupRateLimitEntries, getRateLimitStats } from '@/lib/rate-limit';
 import { requireAuth } from '@/lib/auth';
+import { logger } from '@/lib/logger';
 
 /**
  * GET /api/cleanup — Get rate limit stats (requires auth)
@@ -17,7 +18,7 @@ export async function GET(request: NextRequest) {
     const stats = await getRateLimitStats();
     return NextResponse.json({ stats });
   } catch (error) {
-    console.error('Cleanup stats error:', error);
+    logger.error('Cleanup stats error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
       stats,
     });
   } catch (error) {
-    console.error('Cleanup error:', error);
+    logger.error('Cleanup error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

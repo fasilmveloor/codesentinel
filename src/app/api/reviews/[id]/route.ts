@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
+import { logger } from '@/lib/logger';
 
 export async function GET(
   request: NextRequest,
@@ -30,7 +31,7 @@ export async function GET(
 
     return NextResponse.json({ review });
   } catch (error) {
-    console.error('Failed to fetch review:', error);
+    logger.error('Failed to fetch review', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -58,7 +59,7 @@ export async function DELETE(
 
     return NextResponse.json({ message: 'Review deleted successfully' });
   } catch (error) {
-    console.error('Failed to delete review:', error);
+    logger.error('Failed to delete review', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

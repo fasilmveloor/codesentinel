@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { DEFAULT_PAGE, DEFAULT_LIMIT, MAX_LIMIT } from '@/lib/constants';
+import { logger } from '@/lib/logger';
 
 export async function GET(request: NextRequest) {
   // Auth check
@@ -13,14 +14,18 @@ export async function GET(request: NextRequest) {
     const rawPage = parseInt(searchParams.get('page') || '1', 10);
     const rawLimit = parseInt(searchParams.get('limit') || String(DEFAULT_LIMIT), 10);
     const status = searchParams.get('status') || undefined;
+    const platform = searchParams.get('platform') || undefined;
 
     // Validate page and limit
     const page = isNaN(rawPage) || rawPage < 1 ? DEFAULT_PAGE : rawPage;
     const limit = isNaN(rawLimit) || rawLimit < 1 ? DEFAULT_LIMIT : Math.min(rawLimit, MAX_LIMIT);
 
-    // Validate status filter if provided
+    // Build filters
     const validStatuses = ['pending', 'reviewing', 'completed', 'failed'];
-    const where = status && validStatuses.includes(status) ? { status } : {};
+    const validPlatforms = ['github', 'gitlab'];
+    const where: Record<string, string> = {};
+    if (status && validStatuses.includes(status)) where.status = status;
+    if (platform && validPlatforms.includes(platform)) where.platform = platform;
 
     const [reviews, total, statsTotal, statsApproved, statsChangesRequested, statsActive] = await Promise.all([
       db.review.findMany({
@@ -61,7 +66,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
-    console.error('Failed to fetch reviews:', error);
+    logger.error('Failed to fetch reviews', { error });
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

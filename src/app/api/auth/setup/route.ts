@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { hashPassword, setAdminPasswordHash, isSetupComplete, createSession, createSessionCookie } from '@/lib/auth';
+import { logger } from '@/lib/logger';
 
 export async function POST(request: NextRequest) {
   try {
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
     const token = await createSession();
     const cookie = createSessionCookie(token);
 
-    console.warn('Admin account created');
+    logger.warn('Admin account created');
 
     return NextResponse.json(
       { success: true, message: 'Admin account created successfully' },
@@ -50,7 +51,7 @@ export async function POST(request: NextRequest) {
       }
     );
   } catch (error) {
-    console.error('Setup error:', error);
+    logger.error('Setup error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

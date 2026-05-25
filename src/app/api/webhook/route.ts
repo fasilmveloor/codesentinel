@@ -6,6 +6,7 @@ import { reviewPR } from '@/lib/reviewer';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { REPO_NAME_REGEX, GITHUB_REVIEW_BODY_MAX, GITHUB_ANNOTATION_LIMIT, REVIEW_TIMEOUT_MS } from '@/lib/constants';
 import { withTimeout } from '@/lib/review-timeout';
+import { logger } from '@/lib/logger';
 
 function truncateForGitHub(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
@@ -42,7 +43,7 @@ async function shouldBlockMerge(): Promise<boolean> {
 }
 
 // Supported comment commands
-const COMMENT_COMMANDS = ['/review', '/recheck', '/check', '/re-review', '/review again', '/help', '/fix', '/explain', '/ignore'];
+const COMMENT_COMMANDS = ['/review', '/recheck', '/check', '/re-review', '/review again', '/help', '/fix', '/explain', '/ignore', '/config'];
 
 function parseCommentCommand(body: string): { isCommand: boolean; command: string; args: string } {
   const trimmed = body.trim().toLowerCase();
@@ -104,7 +105,7 @@ async function processReview(
         );
         await db.review.update({ where: { id: reviewId }, data: { checkRunId } });
       } catch (checkError) {
-        console.error('Failed to create check run (non-fatal):', checkError);
+        logger.error('Failed to create check run (non-fatal)', { error: checkError });
       }
     }
 
@@ -215,7 +216,7 @@ async function processReview(
 
       await postPRReview(owner, repo, prNumber, reviewBody, ghEvent, ghComments, installationId);
     } catch (postError) {
-      console.error('Failed to post review to GitHub:', postError);
+      logger.error('Failed to post review to GitHub', { error: postError });
     }
 
     // If this was triggered by a comment command, reply to the comment
@@ -275,11 +276,11 @@ async function processReview(
           installationId
         );
       } catch (checkError) {
-        console.error('Failed to update check run (non-fatal):', checkError);
+        logger.error('Failed to update check run (non-fatal)', { error: checkError });
       }
     }
   } catch (error) {
-    console.error('Review processing failed:', error);
+    logger.error('Review processing failed', { error });
     if (reviewId) {
       await db.review.update({
         where: { id: reviewId },
@@ -299,6 +300,52 @@ async function processReview(
 
 // --- Webhook Handler ---
 
+const WEBHOOK_DEDUP_WINDOW = 300000; // 5 minutes
+
+async function isDuplicateDelivery(deliveryId: string): Promise<'dedup' | 'retry' | 'new'> {
+  try {
+    const existing = await db.appConfig.findUnique({ where: { key: `delivery:${deliveryId}` } });
+    if (!existing) {
+      await db.appConfig.upsert({
+        where: { key: `delivery:${deliveryId}` },
+        update: { value: String(Date.now()) },
+        create: { key: `delivery:${deliveryId}`, value: String(Date.now()) },
+      });
+      return 'new';
+    }
+    const receivedAt = parseInt(existing.value, 10);
+    if (Date.now() - receivedAt > WEBHOOK_DEDUP_WINDOW) {
+      await db.appConfig.update({
+        where: { key: `delivery:${deliveryId}` },
+        data: { value: String(Date.now()) },
+      });
+      return 'retry';
+    }
+    return 'dedup';
+  } catch {
+    return 'new';
+  }
+}
+
+async function cleanupStaleDeliveryIds(): Promise<void> {
+  try {
+    const cutoff = Date.now() - WEBHOOK_DEDUP_WINDOW * 2;
+    const allDeliveries = await db.appConfig.findMany({
+      where: { key: { startsWith: 'delivery:' } },
+      select: { key: true, value: true },
+    });
+    const staleKeys = allDeliveries
+      .filter(e => parseInt(e.value, 10) < cutoff)
+      .map(e => e.key);
+    if (staleKeys.length > 0) {
+      await db.appConfig.deleteMany({ where: { key: { in: staleKeys } } });
+      logger.debug('Cleaned up stale delivery IDs', { count: staleKeys.length });
+    }
+  } catch {
+    // best-effort
+  }
+}
+
 export async function POST(request: NextRequest) {
   // Rate limiting (MUST await — checkRateLimit is async and returns Promise<boolean>)
   const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
@@ -312,12 +359,29 @@ export async function POST(request: NextRequest) {
     // Verify webhook signature (REQUIRED — no secret means no auth)
     const secretConfig = await db.appConfig.findUnique({ where: { key: 'webhook_secret' } });
     if (!secretConfig?.value) {
-      console.error('SECURITY: No webhook_secret configured — rejecting all webhook requests');
+      logger.error('SECURITY: No webhook_secret configured — rejecting all webhook requests');
       return NextResponse.json({ error: 'Webhook secret not configured' }, { status: 401 });
     }
     const signature = request.headers.get('x-hub-signature-256');
     if (!signature || !verifySignature(body, signature, secretConfig.value)) {
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+    }
+
+    // Webhook idempotency: deduplicate by x-github-delivery header
+    const deliveryId = request.headers.get('x-github-delivery');
+    if (deliveryId) {
+      const dedupResult = await isDuplicateDelivery(deliveryId);
+      if (dedupResult === 'dedup') {
+        logger.info('Duplicate webhook delivery ignored', { deliveryId });
+        return NextResponse.json({ message: 'Duplicate delivery ignored' });
+      }
+      if (dedupResult === 'retry') {
+        logger.info('Retry webhook delivery processed', { deliveryId });
+      }
+      // Lazy cleanup every 100 deliveries
+      if (Math.random() < 0.01) {
+        cleanupStaleDeliveryIds().catch(() => {});
+      }
     }
 
     const payload = JSON.parse(body);
@@ -381,7 +445,7 @@ export async function POST(request: NextRequest) {
         if (owner && repo && pr && headSha && validateRepoParams(owner, repo)) {
           processReview(
             owner, repo, pr.number, pr.title, pr.user?.login || 'unknown', pr.html_url, headSha, installationId
-          ).catch((err) => console.error('Review processing error:', { pr: pr.number, error: err }));
+          ).catch((err) => logger.error('Review processing error', { pr: pr.number, error: err }));
 
           return NextResponse.json({ message: 'Review processing started', pr: pr.number });
         }
@@ -407,11 +471,54 @@ export async function POST(request: NextRequest) {
           // Handle /help command
           const trimmed = commentBody.trim().toLowerCase();
           if (trimmed.startsWith('/help')) {
-            const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/re-review\` | Full re-review |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\` or \`/review please verify error handling\``;
+            const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/re-review\` | Full re-review |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/config\` | View or update configuration |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\` or \`/review please verify error handling\``;
             try {
               await postPRComment(owner, repo, prNumber, helpText, installationId);
             } catch { /* */ }
             return NextResponse.json({ message: 'Help posted', pr: prNumber });
+          }
+
+          // Handle /config command
+          if (trimmed.startsWith('/config')) {
+            const configArgs = commentBody.trim().substring(7).trim();
+            try {
+              const configEntries = await db.appConfig.findMany();
+              if (configArgs) {
+                // Update config
+                const eqIdx = configArgs.indexOf('=');
+                if (eqIdx > 0) {
+                  const key = configArgs.substring(0, eqIdx).trim();
+                  const value = configArgs.substring(eqIdx + 1).trim();
+                  await db.appConfig.upsert({
+                    where: { key },
+                    update: { value },
+                    create: { key, value },
+                  });
+                  const confirmText = `**Config updated** ✅\n\n\`${key}\` = \`${value}\``;
+                  await postPRComment(owner, repo, prNumber, confirmText, installationId);
+                } else {
+                  const key = configArgs;
+                  const entry = configEntries.find(e => e.key === key);
+                  if (entry) {
+                    const masked = entry.key.includes('token') || entry.key.includes('secret') || entry.key.includes('key')
+                      ? entry.value.substring(0, 4) + '…' : entry.value;
+                    await postPRComment(owner, repo, prNumber, `**Config**: \`${entry.key}\` = \`${masked}\``, installationId);
+                  } else {
+                    await postPRComment(owner, repo, prNumber, `**Config**: Key \`${key}\` not found.`, installationId);
+                  }
+                }
+              } else {
+                // Show all config
+                const lines = configEntries.map(e => {
+                  const masked = e.key.includes('token') || e.key.includes('secret') || e.key.includes('key')
+                    ? e.value.substring(0, 4) + '…' : e.value;
+                  return `- \`${e.key}\`: \`${masked}\``;
+                });
+                const configText = `**Current Configuration**\n\n${lines.join('\n')}\n\n_To update: \`/config key=value\`_`;
+                await postPRComment(owner, repo, prNumber, configText, installationId);
+              }
+            } catch { /* */ }
+            return NextResponse.json({ message: 'Config handled', pr: prNumber });
           }
 
           // Handle /ignore command
@@ -481,12 +588,12 @@ export async function POST(request: NextRequest) {
                 focusQuestion,
                 commentId,
                 reviewMode
-              ).catch(console.error);
+              ).catch(err => logger.error('Async error', { error: err }));
             } catch {
               processReview(
                 owner, repo, prNumber, payload.issue?.title || '', commenter || 'unknown', payload.issue?.html_url || '', '', installationId,
                 true, focusFile, focusQuestion, commentId, reviewMode
-              ).catch(console.error);
+              ).catch(err => logger.error('Async error', { error: err }));
             }
 
             return NextResponse.json({ message: 'Re-review triggered by comment command', pr: prNumber });
@@ -523,7 +630,7 @@ export async function POST(request: NextRequest) {
 
             // Handle /help command
             if (reviewCommentTrimmed.startsWith('/help')) {
-              const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/re-review\` | Full re-review |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\``;
+              const helpText = `**CodeSentinel Commands**\n\n| Command | Description |\n|---|---|\n| \`/review\` | Start a full review |\n| \`/recheck\` | Re-review after changes |\n| \`/check\` | Quick check |\n| \`/re-review\` | Full re-review |\n| \`/fix\` | Get fix suggestions |\n| \`/explain\` | Explain the code |\n| \`/ignore\` | Suppress reviews on files |\n| \`/config\` | View or update configuration |\n| \`/help\` | Show this help |\n\nYou can also specify a file or question: \`/check src/auth.ts\``;
               try {
                 await postPRComment(owner, repo, prNumber, helpText, installationId);
               } catch { /* */ }
@@ -543,7 +650,7 @@ export async function POST(request: NextRequest) {
               args || `Re-check this code at ${filePath}`,
               commentId,
               reviewMode
-            ).catch(console.error);
+            ).catch(err => logger.error('Async error', { error: err }));
 
             return NextResponse.json({ message: 'Re-review triggered by review comment command', pr: prNumber });
           }
@@ -565,7 +672,7 @@ export async function POST(request: NextRequest) {
         if (owner && repo && prNumber && headSha && validateRepoParams(owner, repo)) {
           try {
             const prInfo = await fetchPRInfo(owner, repo, prNumber, installationId);
-            processReview(owner, repo, prNumber, prInfo.title, prInfo.author, prInfo.url, headSha, installationId).catch((err) => console.error('Re-review error:', { pr: prNumber, error: err }));
+            processReview(owner, repo, prNumber, prInfo.title, prInfo.author, prInfo.url, headSha, installationId).catch((err) => logger.error('Re-review error', { pr: prNumber, error: err }));
             return NextResponse.json({ message: 'Re-review processing started', pr: prNumber });
           } catch {
             return NextResponse.json({ error: 'Failed to fetch PR info for re-review' }, { status: 500 });
@@ -576,7 +683,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ message: 'Event ignored' });
   } catch (error) {
-    console.error('Webhook error:', error);
+    logger.error('Webhook error', { error });
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
