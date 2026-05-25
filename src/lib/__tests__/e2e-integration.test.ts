@@ -325,14 +325,14 @@ describe('GitHub Webhook E2E', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Default mock implementations — provide webhook_secret for all tests
-    vi.mocked(db.appConfig.findUnique).mockImplementation(async (args: any) => {
+    (vi.mocked(db.appConfig.findUnique) as any).mockImplementation(async (args: any) => {
       const key = args?.where?.key;
-      if (key === 'webhook_secret') return { key, value: GITHUB_WEBHOOK_SECRET, id: '1' } as never;
+      if (key === 'webhook_secret') return { key, value: GITHUB_WEBHOOK_SECRET, id: '1' };
       if (key === 'block_merge') return null;
       if (key && key.startsWith('rate_limit:')) return null;
       return null;
     });
-    vi.mocked(db.appConfig.upsert).mockResolvedValue({ key: 'test', value: 'test', id: '1' } as never);
+    (vi.mocked(db.appConfig.upsert) as any).mockResolvedValue({ key: 'test', value: 'test', id: '1' });
     vi.mocked(upsertRepository).mockResolvedValue('repo-id-1');
     vi.mocked(fetchPRDiff).mockResolvedValue(SAMPLE_DIFF);
     vi.mocked(fetchPRInfo).mockResolvedValue({
@@ -425,9 +425,9 @@ describe('GitHub Webhook E2E', () => {
 
       const bodyStr = JSON.stringify(payload);
 
-      vi.mocked(db.appConfig.findUnique).mockImplementation(async (args: any) => {
+      (vi.mocked(db.appConfig.findUnique) as any).mockImplementation(async (args: any) => {
         const key = args?.where?.key;
-        if (key === 'webhook_secret') return { key, value: GITHUB_WEBHOOK_SECRET, id: '1' } as never;
+        if (key === 'webhook_secret') return { key, value: GITHUB_WEBHOOK_SECRET, id: '1' };
         return null;
       });
 
@@ -558,11 +558,11 @@ describe('GitHub Webhook E2E', () => {
   describe('rate limiting', () => {
     it('should return 429 when rate limit is exceeded', async () => {
       // Mock rate limit as exceeded (but still provide webhook_secret)
-      vi.mocked(db.appConfig.findUnique).mockImplementation(async (args: any) => {
+      (vi.mocked(db.appConfig.findUnique) as any).mockImplementation(async (args: any) => {
         const key = args?.where?.key;
-        if (key === 'webhook_secret') return { key, value: GITHUB_WEBHOOK_SECRET, id: '1' } as never;
+        if (key === 'webhook_secret') return { key, value: GITHUB_WEBHOOK_SECRET, id: '1' };
         if (key && key.startsWith('rate_limit:')) {
-          return { key, value: '30:9999999999999', id: '1' } as never;
+          return { key, value: '30:9999999999999', id: '1' };
         }
         return null;
       });
@@ -591,19 +591,21 @@ describe('GitLab Webhook E2E', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Default mock implementations — provide gitlab_webhook_secret for all tests
-    vi.mocked(db.appConfig.findUnique).mockImplementation(async (args: any) => {
+    (vi.mocked(db.appConfig.findUnique) as any).mockImplementation(async (args: any) => {
       const key = args?.where?.key;
-      if (key === 'gitlab_webhook_secret') return { key, value: 'test-token', id: '1' } as never;
+      if (key === 'gitlab_webhook_secret') return { key, value: 'test-token', id: '1' };
       if (key && key.startsWith('rate_limit:')) return null;
       return null;
     });
-    vi.mocked(db.appConfig.upsert).mockResolvedValue({ key: 'test', value: 'test', id: '1' } as never);
+    (vi.mocked(db.appConfig.upsert) as any).mockResolvedValue({ key: 'test', value: 'test', id: '1' });
     vi.mocked(upsertGitLabRepository).mockResolvedValue('repo-id-2');
     vi.mocked(fetchMRDiff).mockResolvedValue(SAMPLE_DIFF);
     vi.mocked(fetchMRChanges).mockResolvedValue({
+      changes: [],
       mrInfo: {
         title: 'Add session validation',
         author: 'developer',
+        url: 'https://gitlab.com/owner/repo/-/merge_requests/5',
         description: 'This MR adds a new validateSession function',
         targetBranch: 'main',
         sourceBranch: 'feature/auth',
@@ -687,9 +689,9 @@ describe('GitLab Webhook E2E', () => {
         project: { path_with_namespace: 'owner/repo', web_url: 'https://gitlab.com/owner/repo' },
       };
 
-      vi.mocked(db.appConfig.findUnique).mockImplementation(async (args: any) => {
+      (vi.mocked(db.appConfig.findUnique) as any).mockImplementation(async (args: any) => {
         const key = args?.where?.key;
-        if (key === 'gitlab_webhook_secret') return { key, value: 'correct-token', id: '1' } as never;
+        if (key === 'gitlab_webhook_secret') return { key, value: 'correct-token', id: '1' };
         return null;
       });
 
@@ -784,7 +786,7 @@ describe('Rate Limit E2E', () => {
 
   it('should allow requests within rate limit', async () => {
     vi.mocked(db.appConfig.findUnique).mockResolvedValue(null);
-    vi.mocked(db.appConfig.upsert).mockResolvedValue({ key: 'test', value: '1:9999999999999', id: '1', createdAt: new Date(), updatedAt: new Date() });
+    vi.mocked(db.appConfig.upsert).mockResolvedValue({ key: 'test', value: '1:9999999999999', id: '1' } as any);
 
     const result = await checkRateLimit('192.168.1.1');
     expect(result).toBe(true);
@@ -793,11 +795,9 @@ describe('Rate Limit E2E', () => {
   it('should block requests exceeding rate limit', async () => {
     vi.mocked(db.appConfig.findUnique).mockResolvedValue({
       key: 'rate_limit:10.0.0.1',
-      value: '30:9999999999999', // 30 hits, window far in the future
+      value: '30:9999999999999',
       id: '1',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
+    } as any);
 
     const result = await checkRateLimit('10.0.0.1');
     expect(result).toBe(false);
