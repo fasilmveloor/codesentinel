@@ -1,4 +1,5 @@
 import { db } from './db';
+import { logger } from '@/lib/logger';
 
 export interface MRInfo {
   title: string;
@@ -138,7 +139,7 @@ export async function postMRDiscussion(owner: string, repo: string, mrIid: numbe
     { method: 'POST', headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'CodeSentinel', 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) }
   );
   if (!response.ok) {
-    console.error('Failed to post MR discussion:', response.status);
+    logger.error('Failed to post MR discussion', { status: response.status });
     throw new Error(`Failed to post MR discussion: ${response.status}`);
   }
 }
@@ -152,7 +153,7 @@ export async function postMRNote(owner: string, repo: string, mrIid: number, bod
     { method: 'POST', headers: { 'PRIVATE-TOKEN': token, 'User-Agent': 'CodeSentinel', 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) }
   );
   if (!response.ok) {
-    console.error('Failed to post MR note:', response.status);
+    logger.error('Failed to post MR note', { status: response.status });
     throw new Error(`Failed to post MR note: ${response.status}`);
   }
 }

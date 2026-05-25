@@ -1,6 +1,7 @@
 import ZAI from 'z-ai-web-dev-sdk';
 import { db } from './db';
 import { AI_API_TIMEOUT, FILE_CONTENT_TRUNCATE, DIFF_MAX_LENGTH, GITHUB_API_TIMEOUT } from './constants';
+import { logger } from '@/lib/logger';
 
 // --- Types ---
 
@@ -286,6 +287,10 @@ async function openAICompatibleCompletion(
     throw err;
   }
 }
+
+// --- Agent Context Management ---
+
+const AGENT_CONTEXT_LIMIT_CHARS = 32000;
 
 // --- Unified chat completion with retry ---
 
@@ -1528,6 +1533,7 @@ export async function reviewPR(
   let totalPromptTokens = 0;
   let totalCompletionTokens = 0;
   let hasRealTokenUsage = false;
+  let prunedMessages = 0;
 
   // Estimate prompt token count from the initial messages
   // This provides a baseline even when the API doesn't return usage data
@@ -1539,6 +1545,32 @@ export async function reviewPR(
       charCount += msg.role.length + 10;
     }
     return Math.ceil(charCount / 4); // ~4 chars per token
+  };
+
+  const pruneMessages = () => {
+    const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+    if (totalChars <= AGENT_CONTEXT_LIMIT_CHARS) return;
+
+    const KEEP_LAST = 3;
+    const keepCount = 1 + KEEP_LAST;
+    if (messages.length <= keepCount) return;
+
+    const removedCount = messages.length - keepCount;
+    const systemMsg = messages[0];
+    const lastMessages = messages.slice(-KEEP_LAST);
+
+    messages.length = 0;
+    messages.push(systemMsg);
+    messages.push({
+      role: 'system' as const,
+      content: `[Previous tool results pruned — ${removedCount} messages removed]`,
+    });
+    for (const msg of lastMessages) {
+      messages.push(msg);
+    }
+
+    prunedMessages += removedCount;
+    logger.warn(`Agent context pruned: removed ${removedCount} messages (${totalChars} chars > ${AGENT_CONTEXT_LIMIT_CHARS} limit)`);
   };
 
   const maxSteps = Math.min(Math.max(aiConfig.maxSteps, 1), 10);
@@ -1612,6 +1644,7 @@ export async function reviewPR(
           role: 'user',
           content: `Tool result for ${toolName}:\n\`\`\`\n${toolResult}\n\`\`\`\n\nContinue your review. Briefly note what you learned from this result.`,
         });
+        pruneMessages();
         continue;
       }
 
@@ -1648,12 +1681,12 @@ export async function reviewPR(
           durationMs: Date.now() - stepStartTime,
         });
 
-        console.warn(`Agent review completed in ${totalDuration}ms with ${agentSteps.length} steps`);
+        logger.warn('Agent review completed', { totalDuration, steps: agentSteps.length });
 
         // Run hallucination validation against the actual diff
         const hallucinationResult = validateReviewAgainstDiff(parsed, diffRanges);
         if (hallucinationResult.warnings.length > 0) {
-          console.warn(`Hallucination guard: ${hallucinationResult.warnings.length} warning(s)`, hallucinationResult.warnings);
+          logger.warn('Hallucination guard', { count: hallucinationResult.warnings.length, warnings: hallucinationResult.warnings });
         }
 
         const tokenUsage: TokenUsage = {
@@ -1701,7 +1734,7 @@ export async function reviewPR(
           // Run hallucination validation
           const hallucinationResult = validateReviewAgainstDiff(finalParsed, diffRanges);
           if (hallucinationResult.warnings.length > 0) {
-            console.warn(`Hallucination guard (force_final): ${hallucinationResult.warnings.length} warning(s)`, hallucinationResult.warnings);
+            logger.warn('Hallucination guard (force_final)', { count: hallucinationResult.warnings.length, warnings: hallucinationResult.warnings });
           }
           const tokenUsage: TokenUsage = {
             promptTokens: totalPromptTokens,
@@ -1721,6 +1754,7 @@ export async function reviewPR(
         role: 'user',
         content: 'Please continue. Either call a tool or provide your final review as JSON.',
       });
+      pruneMessages();
     }
   }
 

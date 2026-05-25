@@ -1,5 +1,6 @@
 import { db } from './db';
 import { REVIEW_TIMEOUT_MS } from './constants';
+import { logger } from '@/lib/logger';
 
 /**
  * Cleanup reviews stuck in "reviewing" status for too long.
@@ -27,10 +28,10 @@ export async function cleanupStuckReviews(): Promise<void> {
       });
     }
     if (stuckReviews.length > 0) {
-      console.warn(`Cleaned up ${stuckReviews.length} stuck review(s)`);
+      logger.warn('Cleaned up stuck reviews', { count: stuckReviews.length });
     }
   } catch (err) {
-    console.error('Failed to cleanup stuck reviews:', err);
+    logger.error('Failed to cleanup stuck reviews', { error: err });
   }
 }
 

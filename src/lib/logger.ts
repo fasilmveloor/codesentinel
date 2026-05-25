@@ -12,7 +12,7 @@ function getCurrentLogLevel(): LogLevel {
 
 // --- Structured Logger ---
 
-interface LogContext extends Record<string, unknown> {}
+type LogContext = Record<string, unknown>
 
 class Logger {
   private context: LogContext;

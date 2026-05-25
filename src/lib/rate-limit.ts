@@ -38,9 +38,10 @@ export function getCleanupMetrics(): CleanupMetrics {
 
 // --- Per-IP rate limit tracking (uses DB for serverless compatibility) ---
 
-export async function checkRateLimit(ip: string): Promise<boolean> {
+export async function checkRateLimit(ip: string, max?: number): Promise<boolean> {
   const key = `rate_limit:${ip}`;
   const now = Date.now();
+  const limit = max ?? RATE_LIMIT_MAX;
 
   try {
     const record = await db.appConfig.findUnique({ where: { key } });
@@ -67,7 +68,7 @@ export async function checkRateLimit(ip: string): Promise<boolean> {
     const [countStr, resetTimeStr] = record.value.split(':');
     const count = parseInt(countStr, 10);
 
-    if (count >= RATE_LIMIT_MAX) {
+    if (count >= limit) {
       return false;
     }
 
