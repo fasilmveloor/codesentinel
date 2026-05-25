@@ -1,65 +1,91 @@
-# CLAUDE.md
+# CodeSentinel
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+AI-assisted code review for GitHub and GitLab pull requests. Self-hosted. Hallucination-validated output.
 
-## Project Overview
-
-AI PR Reviewer is a Next.js 16 full-stack application that provides automated AI-powered code review for GitHub pull requests. It uses the z-ai-web-dev-sdk to analyze PRs and post review comments with severity levels (info, warning, error, critical).
-
-## Common Commands
+## Commands
 
 ```bash
-bun run dev      # Start development server on port 3000
-bun run build    # Production build with standalone output
-bun run start    # Start production server (uses standalone build)
-bun run lint     # Run ESLint
-bun run db:push  # Push Prisma schema to database
-bun run db:generate  # Generate Prisma client
-bun run db:migrate  # Run database migrations
-bun run db:reset  # Reset database
+bun run dev        # Dev server on port 3000
+bun run build      # Production build (standalone output)
+bun run start      # Start production server
+bun run lint       # ESLint
+bun run test       # Vitest (460 tests, 23 files)
+bun run db:push    # Push Prisma schema
+bun run db:generate # Generate Prisma client
+bun run db:migrate # Run migrations
+bun run db:reset   # Reset database
 ```
 
 ## Architecture
 
-**Stack**: Next.js 16 (App Router), TypeScript, Tailwind CSS 4, Prisma (SQLite), shadcn/ui (Radix UI), Zustand, NextAuth
+**Stack**: Next.js 16 (App Router), TypeScript 5 strict, Prisma (SQLite/PostgreSQL), Tailwind CSS 4, shadcn/ui, z-ai-web-dev-sdk, Zustand
 
-**Core Flow**:
-1. GitHub webhook triggers on PR events → `src/app/api/webhook/route.ts`
-2. Review is queued and processed asynchronously via `src/lib/reviewer.ts`
-3. AI analysis uses z-ai-web-dev-sdk to generate code review comments
-4. Results posted back to GitHub via `src/lib/github.ts`
+**Core flow**:
+1. Webhook (GitHub/GitLab) → `src/app/api/webhook/route.ts` — HMAC verification, delivery dedup
+2. Review queued → `src/lib/reviewer.ts` — multi-turn AI agent loop (configurable 1-10 steps)
+3. 8 tools available to AI: file fetching, symbol search, dep analysis, relationship mapping, historical context, architectural scoring
+4. Output validated → `validateReviewAgainstDiff()` hallucination guard checks file paths, line ranges, hunks
+5. Results posted → `src/lib/github.ts` / `src/lib/gitlab.ts` — inline comments, check runs, severity tags
 
-**Database Models** (Prisma):
-- `AppConfig` — Key-value store for app settings (GitHub token, webhook secret)
-- `Repository` — GitHub repositories being monitored
-- `Review` — Individual PR reviews with status, summary, scores
-- `ReviewComment` — Line-level review comments with severity
+**Key modules**:
+- `src/lib/reviewer.ts` — AI review loop (1777 lines, main refactoring target)
+- `src/lib/github.ts` — GitHub API (REST + checks)
+- `src/lib/gitlab.ts` — GitLab API
+- `src/lib/auth.ts` — JWT HS256 sessions, scrypt password hashing
+- `src/lib/rate-limit.ts` — DB-backed IP rate limiter
+- `src/lib/logger.ts` — Structured logger (debug/info/warn/error)
+- `src/lib/secrets.ts` — AES-256-GCM encryption (not yet wired to config path)
+- `src/lib/validation.ts` — Input sanitization (ReDoS protection, path traversal prevention)
+- `src/lib/queue.ts` — DB-backed persistent job queue
+- `src/lib/tracer.ts` — Distributed tracing (span IDs)
 
-**API Routes**:
-- `src/app/api/webhook/route.ts` — GitHub webhook endpoint with HMAC verification
-- `src/app/api/reviews/route.ts` — List/create reviews
-- `src/app/api/reviews/[id]/route.ts` — Get/delete single review
-- `src/app/api/reviews/trigger/route.ts` — Manual review trigger
-- `src/app/api/config/route.ts` — Get/update app configuration
+**Database** (Prisma, 4 models): AppConfig (key-value config), Repository (repos being monitored), Review (review status/summary/scores), ReviewComment (line-level comments with severity)
 
-**Key Libraries**:
-- `src/lib/github.ts` — GitHub API client (fetch PR diffs, post reviews)
-- `src/lib/gitlab.ts` — GitLab API integration
-- `src/lib/reviewer.ts` — AI review engine with system prompt
+**API routes**:
+- `GET /api` — Health check with DB probe
+- `POST /api/webhook` — GitHub webhook
+- `POST /api/webhook/gitlab` — GitLab webhook
+- `GET/POST /api/reviews` — List/create reviews
+- `GET/DELETE /api/reviews/[id]` — Single review
+- `POST /api/reviews/trigger` — Manual trigger
+- `GET/PUT /api/config` — App configuration
+- `POST /api/auth/setup` — Initial admin setup
+- `POST /api/auth/login` — Login
+- `POST /api/auth/logout` — Logout
+- `GET /api/auth/status` — Session status
+- `POST /api/auth/change-password` — Password change
+- `DELETE /api/cleanup` — Rate limit entry cleanup
+- `GET /api/cleanup/scheduled` — Cron-triggered cleanup
 
-**Frontend**:
-- Single-page dashboard at `src/app/page.tsx` with 3 tabs: Dashboard, Manual Review, Settings
-- Uses Framer Motion for animations
-- Responsive shadcn/ui components
-- Sonner for toast notifications
+**Slash commands** (in PR/MR comments): `/review`, `/recheck`, `/fix`, `/explain`, `/ignore <pattern>`, `/config [key=value]`, `/help`
+
+**Merge protection**: Opt-in GitHub Check Runs with pass/fail based on severity (critical/error → failure, warning → annotation, info → notice)
+
+## Full docs (for deeper context)
+
+| Doc | What it covers |
+|-----|---------------|
+| `docs/architecture.md` | System diagrams, data flow, sequence diagrams, ER model, failure modes |
+| `docs/agent-system.md` | AI loop internals, tool limitations, hallucination guard, parsing fallback chain |
+| `docs/security.md` | Threat model, auth flows, webhook verification, deployment hardening |
+| `docs/deployment.md` | Docker, env vars, reverse proxy, production setup |
+| `docs/api-reference.md` | All routes, request/response formats, config keys |
+| `docs/testing.md` | Test architecture (460 tests), coverage map, known gaps |
+| `docs/contributing.md` | Setup, code style, how to add tools/providers/platforms |
+| `docs/roadmap.md` | Short/long-term improvements, non-goals |
+
+## Known limitations
+
+- reviewer.ts is 1777 lines — needs splitting into `review/` directory
+- SQLite is single-writer; PostgreSQL recommended for multi-instance
+- Secrets at rest not encrypted (module exists, not wired)
+- No AST analysis — regex-based
+- No comment count cap, no summary fallback
+- No AI quality evaluation harness
+- No UI test coverage
+- Middleware convention deprecated in Next.js 16 (should use `proxy`)
 
 ## Environment
 
-- `DATABASE_URL` — SQLite database path (e.g., `file:./prisma/custom.db`)
-- GitHub token and webhook secret stored in `AppConfig` table
-
-## Development Notes
-
-- Database file: `db/custom.db` (SQLite)
-- The app uses Next.js standalone mode for production deployment
-- Webhook endpoint requires HMAC-SHA256 signature verification
+- `DATABASE_URL` — `file:./db/custom.db` (dev) or PostgreSQL connection string
+- GitHub token, webhook secret, AI provider config stored in AppConfig table (via Settings UI)
