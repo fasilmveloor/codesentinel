@@ -23,6 +23,18 @@ CodeSentinel was built because:
 
 ---
 
+## Screenshots
+
+![CodeSentinel Dashboard](https://via.placeholder.com/800x400/1a1a2e/e0e0e0?text=Dashboard+Preview)
+*Dashboard — review overview, stats, and filterable review table*
+
+![Inline Review on GitHub PR](https://via.placeholder.com/800x400/1a1a2e/e0e0e0?text=Inline+PR+Review+Preview)
+*AI-generated review comment on a GitHub pull request with severity tagging*
+
+*(Replace these placeholder URLs with actual screenshots before publishing.)*
+
+---
+
 ## How It Works
 
 ```
@@ -162,6 +174,7 @@ Full documentation at [docs/architecture.md](docs/architecture.md).
 ### Prerequisites
 
 - Node.js 20+ or Bun
+- PostgreSQL 16+ (local: [Docker](https://docs.docker.com/engine/install/) or [Neon free tier](https://neon.tech))
 - An AI provider API key (z-ai-web-dev-sdk or OpenAI-compatible)
 
 ### Local Development
@@ -169,9 +182,10 @@ Full documentation at [docs/architecture.md](docs/architecture.md).
 ```bash
 git clone <repo-url> codesentinel
 cd codesentinel
+cp .env.example .env            # Edit DATABASE_URL if needed
+docker compose up -d db         # Start PostgreSQL
 bun install
-bun run db:push
-bun run db:generate
+bun run db:push                 # Create database tables
 bun run dev
 ```
 
@@ -180,8 +194,10 @@ Open `http://localhost:3000`, set up an admin password, then configure your cred
 ### Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
+
+Starts CodeSentinel and PostgreSQL. The app is at `http://localhost:3000`.
 
 See [docs/deployment.md](docs/deployment.md) for production setup, environment variables, reverse proxy configuration, and scaling considerations.
 
@@ -236,8 +252,6 @@ See [docs/security.md](docs/security.md) for the full threat model and operation
 ---
 
 ## Limitations
-
-- **SQLite single-writer** — The default database is SQLite. For multi-instance deployments, PostgreSQL is recommended.
 - **No AST analysis** — All code analysis is regex-based. True semantic understanding depends on the AI model.
 - **No AI quality evaluation harness** — Benchmarks test the evaluation framework, not the AI model's review quality. See [docs/roadmap.md](docs/roadmap.md) for planned evaluation harness.
 - **No comment count cap** — The agent loop may generate more comments than ideal for very large PRs.
@@ -254,7 +268,7 @@ See [docs/security.md](docs/security.md) for the full threat model and operation
 |-------|-----------|
 | Framework | Next.js 16 (App Router, standalone output) |
 | Language | TypeScript 5 (strict, noImplicitAny) |
-| Database | SQLite via Prisma ORM 6 |
+| Database | PostgreSQL 16 via Prisma ORM 6 (local: Docker, production: Neon) |
 | UI | React 19, Tailwind CSS 4, shadcn/ui |
 | AI SDK | z-ai-web-dev-sdk + OpenAI-compatible |
 | Testing | Vitest (460 tests) |

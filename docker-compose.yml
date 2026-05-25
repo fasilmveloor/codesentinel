@@ -1,15 +1,31 @@
-version: '3.8'
 services:
-  ai-pr-reviewer:
+  codesentinel:
     build: .
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_URL=file:./data/reviewer.db
+      - DATABASE_URL=postgresql://codesentinel:codesentinel@db:5432/codesentinel
       - NODE_ENV=production
-    volumes:
-      - pr-reviewer-data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: codesentinel
+      POSTGRES_PASSWORD: codesentinel
+      POSTGRES_DB: codesentinel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codesentinel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
-  pr-reviewer-data:
+  pgdata:

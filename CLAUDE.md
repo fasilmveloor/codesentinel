@@ -18,7 +18,7 @@ bun run db:reset   # Reset database
 
 ## Architecture
 
-**Stack**: Next.js 16 (App Router), TypeScript 5 strict, Prisma (SQLite/PostgreSQL), Tailwind CSS 4, shadcn/ui, z-ai-web-dev-sdk, Zustand
+**Stack**: Next.js 16 (App Router), TypeScript 5 strict, Prisma (PostgreSQL), Tailwind CSS 4, shadcn/ui, z-ai-web-dev-sdk, Zustand
 
 **Core flow**:
 1. Webhook (GitHub/GitLab) → `src/app/api/webhook/route.ts` — HMAC verification, delivery dedup
@@ -77,7 +77,7 @@ bun run db:reset   # Reset database
 ## Known limitations
 
 - reviewer.ts is 1777 lines — needs splitting into `review/` directory
-- SQLite is single-writer; PostgreSQL recommended for multi-instance
+- PostgreSQL is the primary database (Docker for local, Neon for serverless)
 - Secrets at rest not encrypted (module exists, not wired)
 - No AST analysis — regex-based
 - No comment count cap, no summary fallback
@@ -87,5 +87,5 @@ bun run db:reset   # Reset database
 
 ## Environment
 
-- `DATABASE_URL` — `file:./db/custom.db` (dev) or PostgreSQL connection string
+- `DATABASE_URL` — PostgreSQL connection string (default: `postgresql://codesentinel:codesentinel@localhost:5432/codesentinel`)
 - GitHub token, webhook secret, AI provider config stored in AppConfig table (via Settings UI)
